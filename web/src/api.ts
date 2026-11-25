@@ -1,4 +1,4 @@
-import type { BootstrapResponse, Transaction, TransactionType } from './types';
+import type { BootstrapResponse, RecurringItem, Tag, Transaction, TransactionType } from './types';
 
 declare global {
   interface Window {
@@ -73,7 +73,7 @@ export function fetchBootstrap(month: string): Promise<BootstrapResponse> {
   return apiFetch<BootstrapResponse>(`/api/bootstrap?month=${encodeURIComponent(month)}`);
 }
 
-export function createTransaction(input: {
+export interface CreateTransactionPayload {
   type: TransactionType;
   amount: number;
   currency: string;
@@ -82,8 +82,37 @@ export function createTransaction(input: {
   category_id?: string | null;
   description: string;
   occurred_at: string;
-}): Promise<{ transaction: Transaction }> {
+  tags?: string[];
+  installments_total?: number | null;
+  first_installment_month?: string | null;
+  third_party_name?: string | null;
+}
+
+export function createTransaction(input: CreateTransactionPayload): Promise<{ transaction: Transaction }> {
   return apiFetch('/api/transactions', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export interface CreateSharedPurchasePayload {
+  account_id: string;
+  currency: string;
+  category_id?: string | null;
+  description: string;
+  occurred_at: string;
+  own_amount: number;
+  third_party_amount: number;
+  third_party_name: string;
+  installments_total?: number | null;
+  first_installment_month?: string | null;
+  tags?: string[];
+}
+
+export function createSharedPurchase(
+  input: CreateSharedPurchasePayload
+): Promise<{ linked_group_id: string; transactions: Transaction[] }> {
+  return apiFetch('/api/transactions/shared', {
     method: 'POST',
     body: JSON.stringify(input),
   });
@@ -91,16 +120,7 @@ export function createTransaction(input: {
 
 export function updateTransaction(
   id: string,
-  patch: Partial<{
-    type: TransactionType;
-    amount: number;
-    currency: string;
-    account_id: string;
-    to_account_id: string | null;
-    category_id: string | null;
-    description: string;
-    occurred_at: string;
-  }>
+  patch: Partial<CreateTransactionPayload>
 ): Promise<{ transaction: Transaction }> {
   return apiFetch(`/api/transactions/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -118,6 +138,63 @@ export function updateAccountInitialBalance(id: string, initial_balance: number)
   return apiFetch(`/api/accounts/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ initial_balance }),
+  });
+}
+
+export function reconcileAccount(
+  id: string,
+  real_balance: number,
+  description?: string
+): Promise<unknown> {
+  return apiFetch(`/api/accounts/${encodeURIComponent(id)}/reconcile`, {
+    method: 'POST',
+    body: JSON.stringify({ real_balance, description }),
+  });
+}
+
+export function createTag(name: string, color?: string): Promise<{ tag: Tag }> {
+  return apiFetch('/api/tags', {
+    method: 'POST',
+    body: JSON.stringify({ name, color }),
+  });
+}
+
+export function createRecurringItem(input: {
+  name: string;
+  type?: 'expense' | 'income';
+  amount: number;
+  currency?: string;
+  account_id: string;
+  category_id?: string | null;
+  day_of_month?: number | null;
+  active?: number;
+}): Promise<{ recurringItem: RecurringItem }> {
+  return apiFetch('/api/recurring', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateRecurringItem(
+  id: string,
+  patch: Partial<{
+    name: string;
+    amount: number;
+    account_id: string;
+    category_id: string | null;
+    day_of_month: number | null;
+    active: number;
+  }>
+): Promise<{ recurringItem: RecurringItem }> {
+  return apiFetch(`/api/recurring/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteRecurringItem(id: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/recurring/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
 }
 

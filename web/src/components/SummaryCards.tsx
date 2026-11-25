@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, Scale, Wallet } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Coins, Scale, Wallet } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { MonthSummary } from '../types';
 
@@ -7,41 +7,62 @@ interface Props {
 }
 
 export function SummaryCards({ summary }: Props) {
-  const netWorth = summary.accounts.reduce((acc, a) => acc + a.balance, 0);
+  const netWorthArs = summary.accounts
+    .filter((a) => a.currency === 'ARS')
+    .reduce((acc, a) => acc + a.balance, 0);
 
   const cards = [
     {
       label: 'Ingresos del mes',
       value: formatMoney(summary.income),
+      subtitle: undefined,
       icon: ArrowUpRight,
       color: 'text-emerald-400',
       bg: 'bg-emerald-500/10 border-emerald-500/20',
     },
     {
-      label: 'Gastos del mes',
+      label: 'Gastos consumo',
       value: formatMoney(summary.expense),
+      subtitle:
+        summary.usd_expense > 0 ? `+ ${formatMoney(summary.usd_expense, 'USD')}` : undefined,
       icon: ArrowDownRight,
       color: 'text-rose-400',
       bg: 'bg-rose-500/10 border-rose-500/20',
     },
     {
+      label: 'Invertido del mes',
+      value: formatMoney(summary.investment),
+      subtitle: 'Excluido de consumo',
+      icon: Coins,
+      color: 'text-amber-400',
+      bg: 'bg-amber-500/10 border-amber-500/20',
+    },
+    {
       label: 'Balance mensual',
       value: formatMoney(summary.net),
+      subtitle:
+        summary.investment > 0
+          ? `Post-inv: ${formatMoney(summary.net_after_investment)}`
+          : undefined,
       icon: Scale,
       color: summary.net >= 0 ? 'text-sky-400' : 'text-amber-400',
       bg: 'bg-sky-500/10 border-sky-500/20',
     },
     {
-      label: 'Patrimonio neto',
-      value: formatMoney(netWorth),
+      label: 'Patrimonio neto ARS',
+      value: formatMoney(netWorthArs),
+      subtitle:
+        summary.third_party_pending > 0
+          ? `Por cobrar: ${formatMoney(summary.third_party_pending)}`
+          : undefined,
       icon: Wallet,
-      color: netWorth >= 0 ? 'text-violet-400' : 'text-rose-400',
+      color: netWorthArs >= 0 ? 'text-violet-400' : 'text-rose-400',
       bg: 'bg-violet-500/10 border-violet-500/20',
     },
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
       {cards.map((c) => {
         const Icon = c.icon;
         return (
@@ -58,6 +79,7 @@ export function SummaryCards({ summary }: Props) {
             <p className={`mt-2 text-lg font-semibold tracking-tight sm:text-xl ${c.color}`}>
               {c.value}
             </p>
+            {c.subtitle && <p className="mt-0.5 text-[11px] text-zinc-400">{c.subtitle}</p>}
           </div>
         );
       })}

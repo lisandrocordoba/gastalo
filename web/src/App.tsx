@@ -1,20 +1,28 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, Download, KeyRound, Plus, RefreshCw } from 'lucide-react';
 import {
+  createRecurringItem,
+  createSharedPurchase,
+  createTag,
   createTransaction,
+  deleteRecurringItem,
   deleteTransaction,
   downloadCsv,
   fetchBootstrap,
   getStoredToken,
+  reconcileAccount,
   setStoredToken,
   UnauthorizedError,
   updateAccountInitialBalance,
+  updateRecurringItem,
   updateTransaction,
 } from './api';
 import { AccountsGrid } from './components/AccountsGrid';
 import { CategoryChart } from './components/CategoryChart';
+import { FutureProjectionCard } from './components/FutureProjectionCard';
 import { MonthlyChart } from './components/MonthlyChart';
 import { SummaryCards } from './components/SummaryCards';
+import { TagsPanel } from './components/TagsPanel';
 import { TransactionList } from './components/TransactionList';
 import { TransactionModal } from './components/TransactionModal';
 import type { BootstrapResponse, Transaction } from './types';
@@ -49,6 +57,7 @@ export function App() {
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [selectedTag, setSelectedTag] = useState('');
 
   const loadData = useCallback(async (targetMonth: string) => {
     setLoading(true);
@@ -122,7 +131,9 @@ export function App() {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div>
             <h1 className="text-lg font-bold tracking-tight text-white">Gasti Personal</h1>
-            <p className="text-xs text-zinc-400">Mercado Pago · Reservas · BBVA · Efectivo</p>
+            <p className="text-xs text-zinc-400">
+              Mercado Pago · Reservas · TC BBVA · TC MP · Efectivo
+            </p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -195,6 +206,10 @@ export function App() {
                 await updateAccountInitialBalance(id, initial);
                 await loadData(month);
               }}
+              onReconcileBalance={async (id, realBalance) => {
+                await reconcileAccount(id, realBalance);
+                await loadData(month);
+              }}
             />
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -202,10 +217,42 @@ export function App() {
               <MonthlyChart data={data.monthlyHistory} />
             </div>
 
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <TagsPanel
+                byTag={data.summary.by_tag}
+                thirdPartyByPerson={data.summary.third_party_by_person}
+                selectedTagId={selectedTag}
+                onSelectTag={setSelectedTag}
+              />
+              <div className="lg:col-span-2">
+                <FutureProjectionCard
+                  projection={data.projection}
+                  recurringItems={data.recurringItems}
+                  accounts={data.accounts}
+                  categories={data.categories}
+                  onCreateRecurring={async (input) => {
+                    await createRecurringItem(input);
+                    await loadData(month);
+                  }}
+                  onToggleRecurring={async (id, active) => {
+                    await updateRecurringItem(id, { active });
+                    await loadData(month);
+                  }}
+                  onDeleteRecurring={async (id) => {
+                    await deleteRecurringItem(id);
+                    await loadData(month);
+                  }}
+                />
+              </div>
+            </div>
+
             <TransactionList
               transactions={data.transactions}
               accounts={data.accounts}
               categories={data.categories}
+              tags={data.tags}
+              selectedTag={selectedTag}
+              onSelectTag={setSelectedTag}
               onEdit={(tx) => {
                 setEditingTx(tx);
                 setModalOpen(true);
@@ -227,14 +274,24 @@ export function App() {
           editing={editingTx}
           accounts={data.accounts}
           categories={data.categories}
+          tags={data.tags}
           defaultDate={todayStr()}
           onClose={() => setModalOpen(false)}
+          onCreateTag={async (name) => {
+            const res = await createTag(name);
+            await loadData(month);
+            return res.tag;
+          }}
           onSubmit={async (payload) => {
             if (payload.id) {
               await updateTransaction(payload.id, payload);
             } else {
               await createTransaction(payload);
             }
+            await loadData(month);
+          }}
+          onSubmitShared={async (payload) => {
+            await createSharedPurchase(payload);
             await loadData(month);
           }}
         />
