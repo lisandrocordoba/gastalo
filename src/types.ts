@@ -120,6 +120,11 @@ export interface ParsedTransactionDraft {
   category_id: string | null;
   description: string;
   occurred_at: string;
+  tags: string[];
+  installments_total: number | null;
+  first_installment_month: string | null;
+  third_party_name: string | null;
+  shared_third_party_amount: number | null;
 }
 
 export interface ParsedIntent {

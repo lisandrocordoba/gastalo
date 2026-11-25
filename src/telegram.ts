@@ -1,16 +1,25 @@
-import type { AccountWithBalance, Category, Env, Transaction } from './types';
+import type { AccountWithBalance, Category, Env, Tag, Transaction } from './types';
 import {
+  createSharedPurchase,
   createTransaction,
   deleteTransaction,
+  getFutureProjection,
   getMonthSummary,
   getTransactionById,
   listAccountsWithBalances,
   listCategories,
+  listTags,
   listTransactions,
   updateTransaction,
 } from './db';
 import { answerFinancialQuery, parseMessageWithGemini } from './gemini';
-import { arrayBufferToBase64, currentMonthInTimezone, formatCurrency, todayInTimezone } from './utils';
+import {
+  addMonths,
+  arrayBufferToBase64,
+  currentMonthInTimezone,
+  formatCurrency,
+  todayInTimezone,
+} from './utils';
 
 export interface TelegramUser {
   id: number;
@@ -134,17 +143,51 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
-function mainTxKeyboard(txId: string): InlineButton[][] {
-  return [
-    [
-      { text: '✅ OK', callback_data: `ok:${txId}` },
-      { text: '✏️ Categoría', callback_data: `catm:${txId}` },
-    ],
-    [
-      { text: '🔄 Cuenta', callback_data: `accm:${txId}` },
-      { text: '🗑️ Borrar', callback_data: `del:${txId}` },
-    ],
+function mainTxKeyboard(
+  tx: Transaction,
+  options: { movedToReservas?: boolean } = {}
+): InlineButton[][] {
+  const row1: InlineButton[] = [{ text: '✅ OK', callback_data: `ok:${tx.id}` }];
+  if (tx.type === 'expense' || tx.type === 'income') {
+    row1.push({ text: '✏️ Categoría', callback_data: `catm:${tx.id}` });
+  }
+
+  const row2: InlineButton[] = [
+    { text: '🔄 Cuenta', callback_data: `accm:${tx.id}` },
+    { text: '🏷️ Etiquetas', callback_data: `tagm:${tx.id}` },
   ];
+
+  const rows: InlineButton[][] = [row1, row2];
+
+  if (
+    tx.type === 'third_party_repayment' &&
+    tx.account_id === 'mp' &&
+    !options.movedToReservas
+  ) {
+    rows.push([{ text: '🛡️ Pasar a Reservas', callback_data: `resv:${tx.id}` }]);
+  }
+
+  rows.push([{ text: '🗑️ Borrar', callback_data: `del:${tx.id}` }]);
+  return rows;
+}
+
+function headerForType(type: Transaction['type']): string {
+  switch (type) {
+    case 'income':
+      return '💚 <b>Ingreso registrado</b>';
+    case 'transfer':
+      return '🔁 <b>Transferencia registrada</b>';
+    case 'investment':
+      return '🪙 <b>Inversión registrada</b>';
+    case 'third_party':
+      return '🤝 <b>Gasto de tercero registrado</b>';
+    case 'third_party_repayment':
+      return '💸 <b>Reembolso de tercero registrado</b>';
+    case 'adjustment':
+      return '⚖️ <b>Ajuste de saldo registrado</b>';
+    default:
+      return '🧾 <b>Gasto registrado</b>';
+  }
 }
 
 function formatTransactionMessage(
@@ -160,15 +203,8 @@ function formatTransactionMessage(
   const toAcc = tx.to_account_id ? (accMap.get(tx.to_account_id)?.name ?? tx.to_account_id) : null;
   const cat = tx.category_id ? catMap.get(tx.category_id) : null;
 
-  const header =
-    tx.type === 'income'
-      ? '💚 <b>Ingreso registrado</b>'
-      : tx.type === 'transfer'
-        ? '🔁 <b>Transferencia registrada</b>'
-        : '🧾 <b>Gasto registrado</b>';
-
   const lines = [
-    header,
+    headerForType(tx.type),
     `• <b>Monto:</b> ${formatCurrency(tx.amount, tx.currency)}`,
     `• <b>Descripción:</b> ${escapeHtml(tx.description)}`,
   ];
@@ -182,6 +218,22 @@ function formatTransactionMessage(
     }
   }
 
+  if (tx.third_party_name) {
+    lines.push(`• <b>Tercero:</b> ${escapeHtml(tx.third_party_name)}`);
+  }
+
+  if (tx.installments_total && tx.installments_total > 1) {
+    const perCuota = tx.amount / tx.installments_total;
+    const fromMonth = tx.first_installment_month ? ` desde ${tx.first_installment_month}` : '';
+    lines.push(
+      `• <b>Cuotas:</b> ${tx.installments_total}x ${formatCurrency(perCuota, tx.currency)}${fromMonth}`
+    );
+  }
+
+  if (tx.tags.length > 0) {
+    lines.push(`• <b>Etiquetas:</b> ${tx.tags.map((t) => `#${escapeHtml(t)}`).join(' ')}`);
+  }
+
   lines.push(`• <b>Fecha:</b> ${tx.occurred_at}`);
   if (statusLine) {
     lines.push(`\n${statusLine}`);
@@ -191,11 +243,16 @@ function formatTransactionMessage(
 
 function formatBalancesText(accounts: AccountWithBalance[]): string {
   const lines = ['🏦 <b>Saldos actuales</b>\n'];
-  let liquidTotal = 0;
-  let savingsTotal = 0;
-  let debtTotal = 0;
+  let liquidArs = 0;
+  let savingsArs = 0;
+  let debtArs = 0;
+  const usdAccounts: AccountWithBalance[] = [];
 
   for (const acc of accounts) {
+    if (acc.currency === 'USD') {
+      usdAccounts.push(acc);
+      continue;
+    }
     const emoji =
       acc.type === 'credit_card'
         ? '💳'
@@ -205,15 +262,24 @@ function formatBalancesText(accounts: AccountWithBalance[]): string {
             ? '💵'
             : '🟦';
     lines.push(`${emoji} <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, acc.currency)}`);
-    if (acc.type === 'wallet' || acc.type === 'cash') liquidTotal += acc.balance;
-    else if (acc.type === 'savings') savingsTotal += acc.balance;
-    else if (acc.type === 'credit_card') debtTotal += acc.balance;
+    if (acc.type === 'wallet' || acc.type === 'cash') liquidArs += acc.balance;
+    else if (acc.type === 'savings') savingsArs += acc.balance;
+    else if (acc.type === 'credit_card') debtArs += acc.balance;
   }
 
   lines.push('');
-  lines.push(`💧 <b>Disponible (MP + Efectivo):</b> ${formatCurrency(liquidTotal)}`);
-  lines.push(`🛡️ <b>Reservas:</b> ${formatCurrency(savingsTotal)}`);
-  lines.push(`📊 <b>Patrimonio neto:</b> ${formatCurrency(liquidTotal + savingsTotal + debtTotal)}`);
+  lines.push(`💧 <b>Disponible ARS (MP + Efectivo):</b> ${formatCurrency(liquidArs)}`);
+  lines.push(`🛡️ <b>Reservas ARS:</b> ${formatCurrency(savingsArs)}`);
+  lines.push(`📊 <b>Patrimonio neto ARS:</b> ${formatCurrency(liquidArs + savingsArs + debtArs)}`);
+
+  const nonZeroUsd = usdAccounts.filter((a) => Math.abs(a.balance) >= 0.01);
+  if (nonZeroUsd.length > 0) {
+    lines.push('');
+    for (const acc of nonZeroUsd) {
+      lines.push(`💵 <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, 'USD')}`);
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -223,17 +289,19 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
 
   if (cmd === '/start' || cmd === '/ayuda' || cmd === '/help') {
     const text = [
-      '👋 <b>Hola! Soy tu Gasti personal.</b>',
+      '👋 <b>Hola! Soy tu Gasti personal (v2).</b>',
       '',
-      'Podés mandarme gastos, ingresos o transferencias como quieras:',
-      '• <b>Texto:</b> <i>"Café 3500"</i>, <i>"Supermercado 45k con BBVA"</i>, <i>"Pasé 100k a reservas"</i>, <i>"Pagué la tarjeta 250000"</i>',
-      '• <b>Audio:</b> Nota de voz contando el gasto',
-      '• <b>Foto:</b> Foto de ticket o captura de pago',
-      '• <b>Preguntas:</b> <i>"¿Cuánto gasté en comida este mes?"</i>',
+      'Podés mandarme gastos, ingresos, inversiones o transferencias:',
+      '• <b>Consumo y tags:</b> <i>"Cancha fútbol 12k"</i>, <i>"Alfajor 2500 hormiga"</i>, <i>"Carnicería 30k para casa"</i>',
+      '• <b>Cuotas y compartidos:</b> <i>"Regalo 44000 en 3 cuotas BBVA mitad de Jere"</i>',
+      '• <b>Inversión:</b> <i>"Invertí 150k en BTC"</i>',
+      '• <b>Audio / Foto:</b> Nota de voz o foto de ticket/comprobante',
+      '• <b>Consultas:</b> <i>"¿Cuánto gasté en hormiga este mes?"</i>',
       '',
       '<b>Comandos útiles:</b>',
-      '/resumen — Resumen del mes actual',
-      '/saldos — Saldos de MP, Reservas, BBVA y Efectivo',
+      '/resumen — Resumen del mes actual (categorías, tags, invertido)',
+      '/saldos — Saldos de MP, Reservas, TC BBVA, TC MP y Efectivo',
+      '/futuro — Cuotas + gastos fijos de los próximos 3 meses vs. Reservas',
       '/ultimos — Últimos 5 movimientos',
     ].join('\n');
 
@@ -246,8 +314,16 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
   }
 
   if (cmd === '/saldos') {
-    const accounts = await listAccountsWithBalances(env.DB);
-    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, formatBalancesText(accounts));
+    const month = currentMonthInTimezone(tz);
+    const summary = await getMonthSummary(env.DB, month);
+    const lines = [formatBalancesText(summary.accounts)];
+    if (summary.third_party_by_person.length > 0) {
+      lines.push('\n🤝 <b>Pendiente de terceros (te deben):</b>');
+      for (const p of summary.third_party_by_person) {
+        lines.push(`• ${escapeHtml(p.person)}: ${formatCurrency(p.pending)}`);
+      }
+    }
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'));
     return;
   }
 
@@ -257,9 +333,15 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
     const lines = [
       `📅 <b>Resumen ${month}</b>\n`,
       `💚 <b>Ingresos:</b> ${formatCurrency(summary.income)}`,
-      `💸 <b>Gastos:</b> ${formatCurrency(summary.expense)}`,
-      `⚖️ <b>Balance del mes:</b> ${formatCurrency(summary.net)}`,
+      `💸 <b>Gastos consumo:</b> ${formatCurrency(summary.expense)}`,
     ];
+    if (summary.investment > 0) {
+      lines.push(`🪙 <b>Invertido:</b> ${formatCurrency(summary.investment)}`);
+    }
+    lines.push(`⚖️ <b>Balance (Ingresos - Gastos):</b> ${formatCurrency(summary.net)}`);
+    if (summary.usd_expense > 0) {
+      lines.push(`💵 <b>Gastos USD:</b> ${formatCurrency(summary.usd_expense, 'USD')}`);
+    }
 
     if (summary.by_category.length > 0) {
       lines.push('\n<b>Top categorías:</b>');
@@ -268,7 +350,53 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
       }
     }
 
+    if (summary.by_tag.length > 0) {
+      lines.push('\n<b>Por etiqueta:</b>');
+      for (const t of summary.by_tag.slice(0, 5)) {
+        lines.push(`#${escapeHtml(t.name)}: ${formatCurrency(t.total)} (${t.percentage}%)`);
+      }
+    }
+
+    if (summary.third_party_by_person.length > 0) {
+      lines.push('\n🤝 <b>Pendiente de terceros:</b>');
+      for (const p of summary.third_party_by_person) {
+        lines.push(`• ${escapeHtml(p.person)}: ${formatCurrency(p.pending)}`);
+      }
+    }
+
     lines.push('\n' + formatBalancesText(summary.accounts));
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'));
+    return;
+  }
+
+  if (cmd === '/futuro') {
+    const nextMonth = addMonths(currentMonthInTimezone(tz), 1);
+    const proj = await getFutureProjection(env.DB, nextMonth, 3);
+    const lines = ['🔮 <b>Proyección próximos 3 meses</b>\n'];
+
+    for (const m of proj.months) {
+      lines.push(
+        `📅 <b>${m.month}:</b> ${formatCurrency(m.total_committed)} <i>(Cuotas ${formatCurrency(m.installments_total_amount)} + Fijos ${formatCurrency(m.recurring_total_amount)})</i>`
+      );
+      for (const inst of m.installments.slice(0, 5)) {
+        lines.push(
+          `   • ${escapeHtml(inst.description)} (${inst.installment_number}/${inst.installments_total}): ${formatCurrency(inst.installment_amount)}`
+        );
+      }
+    }
+
+    lines.push('');
+    lines.push(`🛡️ <b>Saldo en MP Reservas:</b> ${formatCurrency(proj.reservas_balance)}`);
+    if (proj.next_month_coverage_delta >= 0) {
+      lines.push(
+        `✅ <b>Próximo mes cubierto</b> (sobran ${formatCurrency(proj.next_month_coverage_delta)})`
+      );
+    } else {
+      lines.push(
+        `⚠️ <b>Falta reservar para ${nextMonth}:</b> ${formatCurrency(Math.abs(proj.next_month_coverage_delta))}`
+      );
+    }
+
     await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'));
     return;
   }
@@ -288,17 +416,52 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
 
     const lines = ['🕒 <b>Últimos movimientos</b>\n'];
     for (const tx of txs) {
-      const sign = tx.type === 'income' ? '+' : tx.type === 'expense' ? '-' : '🔁';
+      const sign =
+        tx.type === 'income' || tx.type === 'third_party_repayment'
+          ? '+'
+          : tx.type === 'transfer'
+            ? '🔁'
+            : tx.type === 'investment'
+              ? '🪙'
+              : '-';
       const label =
         tx.type === 'transfer'
           ? `${accMap.get(tx.account_id) ?? tx.account_id} → ${accMap.get(tx.to_account_id ?? '') ?? ''}`
-          : `${catMap.get(tx.category_id ?? '') ?? 'Sin cat.'} · ${accMap.get(tx.account_id) ?? tx.account_id}`;
+          : `${catMap.get(tx.category_id ?? '') ?? tx.type} · ${accMap.get(tx.account_id) ?? tx.account_id}`;
+      const tagStr = tx.tags.length > 0 ? ` · ${tx.tags.map((t) => `#${t}`).join(' ')}` : '';
       lines.push(
-        `${sign} <b>${formatCurrency(tx.amount, tx.currency)}</b> — ${escapeHtml(tx.description)}\n   <i>${tx.occurred_at} · ${escapeHtml(label)}</i>`
+        `${sign} <b>${formatCurrency(tx.amount, tx.currency)}</b> — ${escapeHtml(tx.description)}\n   <i>${tx.occurred_at} · ${escapeHtml(label)}${escapeHtml(tagStr)}</i>`
       );
     }
     await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'));
   }
+}
+
+async function renderTagMenu(
+  token: string,
+  chatId: number,
+  messageId: number,
+  tx: Transaction,
+  tags: Tag[]
+): Promise<void> {
+  const active = new Set(tx.tags);
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < tags.length; i += 2) {
+    rows.push(
+      tags.slice(i, i + 2).map((t) => ({
+        text: `${active.has(t.id) ? '✅ ' : ''}#${t.name}`,
+        callback_data: `tagt:${tx.id}:${t.id.slice(0, 40)}`,
+      }))
+    );
+  }
+  rows.push([{ text: '⬅️ Volver', callback_data: `back:${tx.id}` }]);
+  await editMessageText(
+    token,
+    chatId,
+    messageId,
+    '🏷️ <b>Tocá las etiquetas para activar/quitar:</b>',
+    rows
+  );
 }
 
 async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise<void> {
@@ -377,11 +540,71 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
   if (action === 'accm') {
     const accounts = await listAccountsWithBalances(env.DB);
     const rows: InlineButton[][] = accounts.map((a) => [
-      { text: a.name, callback_data: `acc:${txId}:${a.id}` },
+      { text: `${a.name} (${a.currency})`, callback_data: `acc:${txId}:${a.id}` },
     ]);
     rows.push([{ text: '⬅️ Volver', callback_data: `back:${txId}` }]);
     await editMessageText(token, msg.chat.id, msg.message_id, '🏦 <b>Elegí la cuenta:</b>', rows);
     await answerCallbackQuery(token, cb.id);
+    return;
+  }
+
+  if (action === 'tagm') {
+    const [tx, tags] = await Promise.all([getTransactionById(env.DB, txId), listTags(env.DB)]);
+    if (!tx) {
+      await answerCallbackQuery(token, cb.id, 'Movimiento no encontrado');
+      return;
+    }
+    await renderTagMenu(token, msg.chat.id, msg.message_id, tx, tags);
+    await answerCallbackQuery(token, cb.id);
+    return;
+  }
+
+  if (action === 'tagt' && param) {
+    const [tx, tags] = await Promise.all([getTransactionById(env.DB, txId), listTags(env.DB)]);
+    if (!tx) {
+      await answerCallbackQuery(token, cb.id, 'Movimiento no encontrado');
+      return;
+    }
+    const nextTags = tx.tags.includes(param)
+      ? tx.tags.filter((t) => t !== param)
+      : [...tx.tags, param];
+    const updated = await updateTransaction(env.DB, txId, { tags: nextTags });
+    if (updated) {
+      await renderTagMenu(token, msg.chat.id, msg.message_id, updated, tags);
+    }
+    await answerCallbackQuery(token, cb.id, tx.tags.includes(param) ? 'Etiqueta quitada' : 'Etiqueta agregada');
+    return;
+  }
+
+  if (action === 'resv') {
+    const [tx, accounts, categories] = await Promise.all([
+      getTransactionById(env.DB, txId),
+      listAccountsWithBalances(env.DB),
+      listCategories(env.DB),
+    ]);
+    if (!tx) {
+      await answerCallbackQuery(token, cb.id, 'Movimiento no encontrado');
+      return;
+    }
+    const tz = env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+    await createTransaction(env.DB, {
+      type: 'transfer',
+      amount: tx.amount,
+      currency: tx.currency,
+      account_id: 'mp',
+      to_account_id: 'mp_reservas',
+      description: `Reserva (${tx.description})`,
+      occurred_at: todayInTimezone(tz),
+      source: 'telegram_button',
+    });
+    await editMessageText(
+      token,
+      msg.chat.id,
+      msg.message_id,
+      formatTransactionMessage(tx, accounts, categories, '🛡️ <i>Pasado a MP Reservas</i>'),
+      mainTxKeyboard(tx, { movedToReservas: true })
+    );
+    await answerCallbackQuery(token, cb.id, 'Pasado a Reservas');
     return;
   }
 
@@ -405,7 +628,7 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
     msg.chat.id,
     msg.message_id,
     formatTransactionMessage(tx, accounts, categories),
-    mainTxKeyboard(tx.id)
+    mainTxKeyboard(tx)
   );
   await answerCallbackQuery(token, cb.id, action === 'back' ? undefined : 'Actualizado');
 }
@@ -435,9 +658,10 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
     await sendChatAction(env.TELEGRAM_BOT_TOKEN, chatId, 'typing');
     const tz = env.TIMEZONE || 'America/Argentina/Buenos_Aires';
     const today = todayInTimezone(tz);
-    const [accounts, categories] = await Promise.all([
+    const [accounts, categories, tags] = await Promise.all([
       listAccountsWithBalances(env.DB),
       listCategories(env.DB),
+      listTags(env.DB),
     ]);
 
     let media: { base64: string; mimeType: string; kind: 'audio' | 'image' } | undefined;
@@ -486,20 +710,24 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
       media,
       accounts,
       categories,
+      tags,
       today,
     });
 
     if (parsed.intent === 'query') {
       const month = currentMonthInTimezone(tz);
-      const [summary, recent] = await Promise.all([
+      const nextMonth = addMonths(month, 1);
+      const [summary, recent, projection] = await Promise.all([
         getMonthSummary(env.DB, month),
         listTransactions(env.DB, { month, limit: 30 }),
+        getFutureProjection(env.DB, nextMonth, 3),
       ]);
       const answer = await answerFinancialQuery(env, {
         question: text || 'Resumen del mes',
         summary,
         recentTransactions: recent,
         accounts: summary.accounts,
+        projection,
       });
       await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, escapeHtml(answer));
       return;
@@ -518,6 +746,41 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
     }
 
     for (const draft of parsed.transactions) {
+      if (
+        draft.type === 'expense' &&
+        draft.shared_third_party_amount &&
+        draft.shared_third_party_amount > 0 &&
+        draft.third_party_name
+      ) {
+        const ownAmount = Math.round((draft.amount - draft.shared_third_party_amount) * 100) / 100;
+        const shared = await createSharedPurchase(env.DB, {
+          account_id: draft.account_id,
+          currency: draft.currency,
+          category_id: draft.category_id,
+          description: draft.description,
+          occurred_at: draft.occurred_at,
+          own_amount: ownAmount,
+          third_party_amount: draft.shared_third_party_amount,
+          third_party_name: draft.third_party_name,
+          installments_total: draft.installments_total,
+          first_installment_month: draft.first_installment_month,
+          tags: draft.tags,
+          source,
+          raw_input: text || `[${source}]`,
+          telegram_message_id: message.message_id,
+        });
+
+        for (const created of shared.transactions) {
+          await sendMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            formatTransactionMessage(created, accounts, categories, '🔗 <i>Compra compartida vinculada</i>'),
+            mainTxKeyboard(created)
+          );
+        }
+        continue;
+      }
+
       const created = await createTransaction(env.DB, {
         type: draft.type,
         amount: draft.amount,
@@ -530,13 +793,22 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
         source,
         raw_input: text || `[${source}]`,
         telegram_message_id: message.message_id,
+        installments_total: draft.installments_total,
+        first_installment_month: draft.first_installment_month,
+        third_party_name: draft.third_party_name,
+        tags: draft.tags,
       });
+
+      const statusHint =
+        created.type === 'third_party_repayment' && created.account_id === 'mp'
+          ? '💡 <i>Si corresponde a cuotas futuras, podés pasarlo directo a Reservas:</i>'
+          : undefined;
 
       await sendMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        formatTransactionMessage(created, accounts, categories),
-        mainTxKeyboard(created.id)
+        formatTransactionMessage(created, accounts, categories, statusHint),
+        mainTxKeyboard(created)
       );
     }
   } catch (err) {

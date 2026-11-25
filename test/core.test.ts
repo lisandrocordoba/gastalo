@@ -5,6 +5,7 @@ import {
   computeFutureProjection,
   computeThirdPartyBalances,
 } from '../src/db';
+import { sanitizeParsedIntent } from '../src/gemini';
 import type { Account, RecurringItem } from '../src/types';
 import {
   addMonths,
@@ -75,10 +76,6 @@ describe('double-entry accounting v2 balances', () => {
   });
 
   it('handles investment, third-party split in installments, repayment to reservas, and adjustments', () => {
-    // Caso 1 de docs/MODELO_DATOS_V2.md:
-    // Regalo $44.000 en 3 cuotas en TC BBVA (22k propio + 22k Jere),
-    // Jere transfiere $22.000 hoy a MP y lo pasamos a MP Reservas,
-    // además invertimos $150.000 en BTC y ajustamos +$500 en Efectivo.
     const txs = [
       { type: 'expense' as const, amount: 22000, account_id: 'bbva_credito', to_account_id: null, third_party_name: null },
       { type: 'third_party' as const, amount: 22000, account_id: 'bbva_credito', to_account_id: null, third_party_name: 'Jere' },
@@ -93,9 +90,9 @@ describe('double-entry accounting v2 balances', () => {
       computeAccountBalances(accounts, txs).map((a) => [a.id, a.balance])
     );
     expect(balances.bbva_credito).toBe(-44000);
-    expect(balances.mp).toBe(20000); // 100k + 22k - 22k - 80k
-    expect(balances.mp_reservas).toBe(72000); // 50k + 22k
-    expect(balances.efectivo).toBe(9000); // 10k - 1.5k + 0.5k
+    expect(balances.mp).toBe(20000);
+    expect(balances.mp_reservas).toBe(72000);
+    expect(balances.efectivo).toBe(9000);
 
     const tp = computeThirdPartyBalances(txs);
     expect(tp.total_pending).toBe(0);
@@ -183,16 +180,114 @@ describe('future projection (installments + recurring vs reservas)', () => {
 
     const proj = computeFutureProjection(txs, recurring, 60000, '2026-12', 3);
     expect(proj.months.map((m) => m.month)).toEqual(['2026-12', '2027-01', '2027-02']);
-
-    // 2026-12: 7333.33 + 7333.33 + 30000 = 44666.66 + 12000 recurring = 56666.66
     expect(proj.months[0].installments_total_amount).toBe(44666.66);
     expect(proj.months[0].recurring_total_amount).toBe(12000);
     expect(proj.months[0].total_committed).toBe(56666.66);
     expect(proj.next_month_coverage_delta).toBe(3333.34);
-
-    // 2027-02: only the 3-installment purchase remains
     expect(proj.months[2].installments_total_amount).toBe(14666.66);
     expect(proj.months[2].total_committed).toBe(26666.66);
+  });
+});
+
+describe('gemini v2 intent sanitization', () => {
+  const accounts = [
+    { id: 'mp', type: 'wallet' as const },
+    { id: 'mp_reservas', type: 'savings' as const },
+    { id: 'efectivo', type: 'cash' as const },
+    { id: 'bbva_credito', type: 'credit_card' as const },
+    { id: 'bbva_credito_usd', type: 'credit_card' as const },
+    { id: 'mp_credito', type: 'credit_card' as const },
+  ];
+  const categories = [
+    { id: 'supermercado' },
+    { id: 'kiosco_cafe' },
+    { id: 'regalos' },
+    { id: 'otros' },
+    { id: 'otros_ingresos' },
+  ];
+
+  it('normalizes tags, investment category nulling, and next-month installment default on cards', () => {
+    const out = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'investment',
+            amount: 150000,
+            currency: 'ARS',
+            account_id: 'mp',
+            category_id: 'otros',
+            description: 'Compra BTC',
+            occurred_at: '2026-11-25',
+            tags: ['#BTC', 'Ahorro'],
+          },
+          {
+            type: 'expense',
+            amount: 44000,
+            currency: 'ARS',
+            account_id: 'bbva_credito',
+            category_id: 'regalos',
+            description: 'Crocs papá',
+            occurred_at: '2026-11-25',
+            tags: ['#Familia', 'familia'],
+            installments_total: 3,
+            third_party_name: 'Jere',
+            shared_third_party_amount: 22000,
+          },
+        ],
+      },
+      { accounts, categories, today: '2026-11-25' }
+    );
+
+    expect(out.intent).toBe('record');
+    expect(out.transactions).toHaveLength(2);
+    expect(out.transactions[0].category_id).toBeNull();
+    expect(out.transactions[0].tags).toEqual(['btc', 'ahorro']);
+
+    expect(out.transactions[1].first_installment_month).toBe('2026-12');
+    expect(out.transactions[1].tags).toEqual(['familia']);
+    expect(out.transactions[1].shared_third_party_amount).toBe(22000);
+  });
+
+  it('routes USD BBVA card expenses to bbva_credito_usd and applies safe fallbacks', () => {
+    const out = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'expense',
+            amount: 5,
+            currency: 'USD',
+            account_id: 'bbva_credito',
+            category_id: 'categoria_inexistente',
+            description: 'Wallet premium',
+            occurred_at: 'bad-date',
+            tags: ['#Hormiga'],
+            shared_third_party_amount: 10, // invalid >= amount
+            third_party_name: 'Jere',
+          },
+          {
+            type: 'expense',
+            amount: 1000,
+            currency: 'ARS',
+            account_id: 'cuenta_inexistente',
+            category_id: 'kiosco_cafe',
+            description: 'Alfajor',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
+        ],
+      },
+      { accounts, categories, today: '2026-11-25' }
+    );
+
+    expect(out.transactions[0].account_id).toBe('bbva_credito_usd');
+    expect(out.transactions[0].category_id).toBe('otros');
+    expect(out.transactions[0].occurred_at).toBe('2026-11-25');
+    expect(out.transactions[0].tags).toEqual(['hormiga']);
+    expect(out.transactions[0].shared_third_party_amount).toBeNull();
+
+    expect(out.transactions[1].account_id).toBe('mp');
   });
 });
 
