@@ -119,8 +119,5 @@ El esquema actual en [migrations/0001_initial.sql](../migrations/0001_initial.sq
 - `categories`: 10 categorías de gasto + 3 de ingreso (ej. hoy falta *Deportes / Recreación* para cosas como alquiler de cancha).
 - `transactions`: movimientos de tipo `expense`, `income` o `transfer`, con `account_id`, `to_account_id`, `category_id`, `amount`, `currency`, `occurred_at`, `source` y `raw_input`.
 
-### Próximo paso: Revisión contra tu historial real de Wallet
-Cuando exportes tus movimientos de **Wallet by BudgetBakers** (CSV/XLSX), colocá el archivo en `imports/` (ignorado por Git) para analizar juntos:
-1. Qué **categorías y subcategorías** usás realmente (y cuáles sobran o faltan, como Deportes, Regalos, Viajes, etc.).
-2. Cómo registrabas **transferencias, reservas, rendimientos y cuotas de BBVA** en Wallet.
-3. Si hace falta agregar columnas o tablas nuevas (por ejemplo `tags`, `installments` para cuotas, `rules` para reglas aprendidas o `budgets` para cajitas) antes de migrar tu histórico a D1.
+### Evolución a Modelo de Datos v2
+La especificación completa del **Modelo de Datos v2** (6 cuentas, 16 categorías de gasto + 4 de ingreso, etiquetas N:M, inversiones, cuotas, gastos fijos y guía de *edge cases* de gastos compartidos) ya está documentada en [Modelo de Datos v2 y Casos de Uso](MODELO_DATOS_V2.md).

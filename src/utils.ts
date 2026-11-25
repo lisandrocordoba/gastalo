@@ -52,16 +52,37 @@ export function getMonthDateRange(month: string): { start: string; end: string }
   };
 }
 
-export function previousMonths(endMonth: string, count: number): string[] {
-  const [yStr, mStr] = endMonth.split('-');
+export function addMonths(ym: string, delta: number): string {
+  const [yStr, mStr] = ym.split('-');
   const year = Number(yStr);
   const monthIdx = Number(mStr) - 1;
+  const d = new Date(Date.UTC(year, monthIdx + delta, 1));
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+export function monthDiff(startYm: string, endYm: string): number {
+  const [sy, sm] = startYm.split('-').map(Number);
+  const [ey, em] = endYm.split('-').map(Number);
+  return (ey - sy) * 12 + (em - sm);
+}
+
+export function previousMonths(endMonth: string, count: number): string[] {
   const result: string[] = [];
   for (let i = count - 1; i >= 0; i--) {
-    const d = new Date(Date.UTC(year, monthIdx - i, 1));
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-    result.push(`${y}-${m}`);
+    result.push(addMonths(endMonth, -i));
   }
   return result;
+}
+
+export function slugifyTag(name: string): string {
+  return name
+    .trim()
+    .replace(/^#/, '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }

@@ -36,7 +36,7 @@ export function TransactionModal({
   const [currency, setCurrency] = useState('ARS');
   const [accountId, setAccountId] = useState('mp');
   const [toAccountId, setToAccountId] = useState('mp_reservas');
-  const [categoryId, setCategoryId] = useState('comida');
+  const [categoryId, setCategoryId] = useState('supermercado');
   const [description, setDescription] = useState('');
   const [occurredAt, setOccurredAt] = useState(defaultDate);
   const [saving, setSaving] = useState(false);
@@ -60,7 +60,7 @@ export function TransactionModal({
       setCurrency('ARS');
       setAccountId(accounts.find((a) => a.is_default)?.id ?? accounts[0]?.id ?? 'mp');
       setToAccountId('mp_reservas');
-      setCategoryId('comida');
+      setCategoryId(categories.find((c) => c.type === 'expense')?.id ?? 'supermercado');
       setDescription('');
       setOccurredAt(defaultDate);
     }
@@ -135,7 +135,7 @@ export function TransactionModal({
                 onClick={() => {
                   setType(t);
                   if (t === 'income') setCategoryId('sueldo');
-                  if (t === 'expense') setCategoryId('comida');
+                  if (t === 'expense') setCategoryId(categories.find((c) => c.type === 'expense')?.id ?? 'supermercado');
                 }}
                 className={`rounded-lg py-1.5 text-xs font-medium transition ${
                   type === t

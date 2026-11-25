@@ -5,7 +5,8 @@ Asistente personal de finanzas 100% gratuito (\$0/mes) diseñado para el flujo a
 - **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`)**: entiende texto libre, notas de voz y fotos de tickets/comprobantes.
 - **Dashboard Web (PWA + Telegram Mini App)**: saldos por cuenta, gráficos por categoría, evolución mensual de 6 meses, buscador, edición y exportación a CSV.
 
-> 📘 **Documentación técnica y flujo de trabajo:** leé [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) para entender la infraestructura en Cloudflare, los límites del plan gratuito (\$0/mes), las medidas de seguridad y la política de versionado (desarrollo local + deploy controlado solo desde `main`).
+> 📘 **Documentación técnica y flujo de trabajo:** leé [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) para entender la infraestructura en Cloudflare, los límites del plan gratuito (\$0/mes), las medidas de seguridad y la política de versionado (desarrollo local + deploy controlado solo desde `main`).  
+> 📐 **Modelo de Datos v2 y Casos de Uso:** consultá [docs/MODELO_DATOS_V2.md](docs/MODELO_DATOS_V2.md) para el detalle de cuentas, categorías, etiquetas, cuotas, inversiones y manejo de gastos compartidos.
 
 ---
 

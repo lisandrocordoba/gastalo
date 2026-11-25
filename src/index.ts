@@ -1,21 +1,46 @@
 import { Hono } from 'hono';
 import { verifyDashboardAuth } from './auth';
 import {
+  createRecurringItem,
+  createSharedPurchase,
+  createTag,
   createTransaction,
+  deleteRecurringItem,
   deleteTransaction,
+  getFutureProjection,
   getMonthlyHistory,
   getMonthSummary,
   listAccountsWithBalances,
   listCategories,
+  listRecurringItems,
+  listTags,
   listTransactions,
+  reconcileAccountBalance,
   updateAccountInitialBalance,
+  updateRecurringItem,
   updateTransaction,
 } from './db';
 import { handleTelegramUpdate, type TelegramUpdate } from './telegram';
-import type { Env, TransactionInput } from './types';
-import { currentMonthInTimezone, todayInTimezone } from './utils';
+import type {
+  Env,
+  RecurringItemInput,
+  SharedPurchaseInput,
+  TransactionInput,
+  TransactionType,
+} from './types';
+import { addMonths, currentMonthInTimezone, todayInTimezone } from './utils';
 
 const app = new Hono<{ Bindings: Env }>();
+
+const VALID_TX_TYPES = new Set<TransactionType>([
+  'expense',
+  'income',
+  'transfer',
+  'investment',
+  'third_party',
+  'third_party_repayment',
+  'adjustment',
+]);
 
 app.get('/api/health', (c) => {
   return c.json({ ok: true, env: c.env.APP_ENV || 'production' });
@@ -51,30 +76,42 @@ app.use('/api/*', async (c, next) => {
 
 app.get('/api/bootstrap', async (c) => {
   const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
-  const month = c.req.query('month') || currentMonthInTimezone(tz);
+  const currentMonth = currentMonthInTimezone(tz);
+  const month = c.req.query('month') || currentMonth;
+  const nextMonth = addMonths(currentMonth, 1);
 
-  const [categories, summary, monthlyHistory, transactions] = await Promise.all([
-    listCategories(c.env.DB),
-    getMonthSummary(c.env.DB, month),
-    getMonthlyHistory(c.env.DB, month, 6),
-    listTransactions(c.env.DB, { month, limit: 200 }),
-  ]);
+  const [categories, tags, summary, monthlyHistory, transactions, recurringItems, projection] =
+    await Promise.all([
+      listCategories(c.env.DB),
+      listTags(c.env.DB),
+      getMonthSummary(c.env.DB, month),
+      getMonthlyHistory(c.env.DB, month, 6),
+      listTransactions(c.env.DB, { month, limit: 200 }),
+      listRecurringItems(c.env.DB),
+      getFutureProjection(c.env.DB, nextMonth, 3),
+    ]);
 
   return c.json({
     month,
     accounts: summary.accounts,
     categories,
+    tags,
     summary,
     monthlyHistory,
     transactions,
+    recurringItems,
+    projection,
   });
 });
 
 app.get('/api/transactions', async (c) => {
+  const rawType = c.req.query('type') as TransactionType | undefined;
   const txs = await listTransactions(c.env.DB, {
     month: c.req.query('month') || undefined,
     accountId: c.req.query('accountId') || undefined,
     categoryId: c.req.query('categoryId') || undefined,
+    tagId: c.req.query('tagId') || undefined,
+    type: rawType && VALID_TX_TYPES.has(rawType) ? rawType : undefined,
     search: c.req.query('search') || undefined,
     limit: c.req.query('limit') ? Number(c.req.query('limit')) : 200,
   });
@@ -83,8 +120,12 @@ app.get('/api/transactions', async (c) => {
 
 app.post('/api/transactions', async (c) => {
   const body = await c.req.json<Partial<TransactionInput>>();
-  if (!body.type || !body.amount || body.amount <= 0 || !body.account_id || !body.description) {
+  if (!body.type || !VALID_TX_TYPES.has(body.type) || !body.account_id || !body.description) {
     return c.json({ error: 'Datos inválidos' }, 400);
+  }
+  const amount = Number(body.amount);
+  if (!Number.isFinite(amount) || (body.type === 'adjustment' ? amount === 0 : amount <= 0)) {
+    return c.json({ error: 'Monto inválido' }, 400);
   }
   if (body.type === 'transfer' && (!body.to_account_id || body.to_account_id === body.account_id)) {
     return c.json({ error: 'Cuenta destino inválida para transferencia' }, 400);
@@ -93,7 +134,7 @@ app.post('/api/transactions', async (c) => {
   const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
   const tx = await createTransaction(c.env.DB, {
     type: body.type,
-    amount: Number(body.amount),
+    amount,
     currency: body.currency || c.env.DEFAULT_CURRENCY || 'ARS',
     account_id: body.account_id,
     to_account_id: body.to_account_id ?? null,
@@ -101,8 +142,45 @@ app.post('/api/transactions', async (c) => {
     description: body.description.trim(),
     occurred_at: body.occurred_at || todayInTimezone(tz),
     source: 'web',
+    installments_total: body.installments_total ?? null,
+    first_installment_month: body.first_installment_month ?? null,
+    third_party_name: body.third_party_name ?? null,
+    linked_group_id: body.linked_group_id ?? null,
+    tags: Array.isArray(body.tags) ? body.tags : undefined,
   });
   return c.json({ transaction: tx }, 201);
+});
+
+app.post('/api/transactions/shared', async (c) => {
+  const body = await c.req.json<Partial<SharedPurchaseInput>>();
+  if (
+    !body.account_id ||
+    !body.description ||
+    !body.third_party_name ||
+    typeof body.own_amount !== 'number' ||
+    typeof body.third_party_amount !== 'number' ||
+    body.own_amount < 0 ||
+    body.third_party_amount <= 0
+  ) {
+    return c.json({ error: 'Datos inválidos para compra compartida' }, 400);
+  }
+
+  const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  const result = await createSharedPurchase(c.env.DB, {
+    account_id: body.account_id,
+    currency: body.currency || c.env.DEFAULT_CURRENCY || 'ARS',
+    category_id: body.category_id ?? 'otros',
+    description: body.description,
+    occurred_at: body.occurred_at || todayInTimezone(tz),
+    own_amount: body.own_amount,
+    third_party_amount: body.third_party_amount,
+    third_party_name: body.third_party_name,
+    installments_total: body.installments_total ?? null,
+    first_installment_month: body.first_installment_month ?? null,
+    tags: Array.isArray(body.tags) ? body.tags : undefined,
+    source: 'web',
+  });
+  return c.json(result, 201);
 });
 
 app.patch('/api/transactions/:id', async (c) => {
@@ -138,6 +216,91 @@ app.patch('/api/accounts/:id', async (c) => {
   return c.json({ account: updated, accounts });
 });
 
+app.post('/api/accounts/:id/reconcile', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ real_balance?: number; occurred_at?: string; description?: string }>();
+  if (typeof body.real_balance !== 'number' || !Number.isFinite(body.real_balance)) {
+    return c.json({ error: 'real_balance debe ser numérico' }, 400);
+  }
+  const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  try {
+    const result = await reconcileAccountBalance(
+      c.env.DB,
+      id,
+      body.real_balance,
+      body.occurred_at || todayInTimezone(tz),
+      body.description
+    );
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Error conciliando cuenta' }, 404);
+  }
+});
+
+app.get('/api/tags', async (c) => {
+  const tags = await listTags(c.env.DB);
+  return c.json({ tags });
+});
+
+app.post('/api/tags', async (c) => {
+  const body = await c.req.json<{ name?: string; color?: string }>();
+  if (!body.name || !body.name.trim()) {
+    return c.json({ error: 'Nombre requerido' }, 400);
+  }
+  const tag = await createTag(c.env.DB, body.name, body.color || '#71717a');
+  return c.json({ tag }, 201);
+});
+
+app.get('/api/recurring', async (c) => {
+  const items = await listRecurringItems(c.env.DB);
+  return c.json({ recurringItems: items });
+});
+
+app.post('/api/recurring', async (c) => {
+  const body = await c.req.json<Partial<RecurringItemInput>>();
+  if (!body.name || !body.account_id || typeof body.amount !== 'number' || body.amount <= 0) {
+    return c.json({ error: 'Datos inválidos' }, 400);
+  }
+  const item = await createRecurringItem(c.env.DB, {
+    name: body.name,
+    type: body.type === 'income' ? 'income' : 'expense',
+    amount: body.amount,
+    currency: body.currency || c.env.DEFAULT_CURRENCY || 'ARS',
+    account_id: body.account_id,
+    category_id: body.category_id ?? null,
+    day_of_month: body.day_of_month ?? null,
+    active: body.active ?? 1,
+  });
+  return c.json({ recurringItem: item }, 201);
+});
+
+app.patch('/api/recurring/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<Partial<RecurringItemInput>>();
+  const updated = await updateRecurringItem(c.env.DB, id, body);
+  if (!updated) {
+    return c.json({ error: 'Gasto fijo no encontrado' }, 404);
+  }
+  return c.json({ recurringItem: updated });
+});
+
+app.delete('/api/recurring/:id', async (c) => {
+  const id = c.req.param('id');
+  const ok = await deleteRecurringItem(c.env.DB, id);
+  if (!ok) {
+    return c.json({ error: 'Gasto fijo no encontrado' }, 404);
+  }
+  return c.json({ ok: true });
+});
+
+app.get('/api/projection', async (c) => {
+  const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  const startMonth = c.req.query('startMonth') || addMonths(currentMonthInTimezone(tz), 1);
+  const months = c.req.query('months') ? Math.min(12, Math.max(1, Number(c.req.query('months')))) : 3;
+  const projection = await getFutureProjection(c.env.DB, startMonth, months);
+  return c.json(projection);
+});
+
 app.get('/api/export.csv', async (c) => {
   const month = c.req.query('month') || undefined;
   const [txs, accounts, categories] = await Promise.all([
@@ -157,7 +320,20 @@ app.get('/api/export.csv', async (c) => {
     return s;
   };
 
-  const header = ['Fecha', 'Tipo', 'Monto', 'Moneda', 'Cuenta', 'Cuenta Destino', 'Categoría', 'Descripción', 'Origen'];
+  const header = [
+    'Fecha',
+    'Tipo',
+    'Monto',
+    'Moneda',
+    'Cuenta',
+    'Cuenta Destino',
+    'Categoría',
+    'Descripción',
+    'Etiquetas',
+    'Cuotas',
+    'Tercero',
+    'Origen',
+  ];
   const rows = txs.map((tx) => [
     tx.occurred_at,
     tx.type,
@@ -167,6 +343,9 @@ app.get('/api/export.csv', async (c) => {
     tx.to_account_id ? (accMap.get(tx.to_account_id) ?? tx.to_account_id) : '',
     tx.category_id ? (catMap.get(tx.category_id) ?? tx.category_id) : '',
     tx.description,
+    tx.tags.join('|'),
+    tx.installments_total ?? '',
+    tx.third_party_name ?? '',
     tx.source,
   ]);
 
