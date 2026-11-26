@@ -163,6 +163,7 @@ export interface ParsedTransactionDraft {
   currency: string;
   account_id: string;
   to_account_id: string | null;
+  to_amount?: number | null;
   category_id: string | null;
   description: string;
   occurred_at: string;
@@ -197,12 +198,24 @@ export type ManageOperation =
       action: 'create_tag';
       name: string;
       color: string;
+    }
+  | {
+      action: 'create_recurring';
+      name: string;
+      recurring_type: 'expense' | 'income';
+      amount: number;
+      currency: string;
+      account_id: string;
+      category_id: string | null;
+      day_of_month: number | null;
+      start_month: string | null;
     };
 
 export interface ParsedIntent {
-  intent: 'record' | 'query' | 'manage' | 'unknown';
+  intent: 'record' | 'query' | 'manage' | 'unsupported' | 'unknown';
   reply_text?: string;
   transcribed_query?: string | null;
+  query_month?: string | null;
   transactions: ParsedTransactionDraft[];
   operations: ManageOperation[];
 }
