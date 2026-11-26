@@ -1033,14 +1033,45 @@ export async function loadAllDataSnapshot(db: D1Database): Promise<{
   };
 }
 
+async function resolveTagIds(db: D1Database, rawTags: string[]): Promise<string[]> {
+  const cleaned = rawTags
+    .map((raw) => String(raw ?? '').trim().replace(/^#/, ''))
+    .filter((s) => s.length > 0);
+  if (cleaned.length === 0) return [];
+
+  const uniqueRaw = Array.from(new Set(cleaned));
+  const existingIds = new Set<string>();
+  const CHUNK_SIZE = 80;
+  for (let i = 0; i < uniqueRaw.length; i += CHUNK_SIZE) {
+    const chunk = uniqueRaw.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const res = await db
+      .prepare(`SELECT id FROM tags WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ id: string }>();
+    for (const row of res.results ?? []) {
+      existingIds.add(row.id);
+    }
+  }
+
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of cleaned) {
+    const id = existingIds.has(raw) ? raw : slugifyTag(raw);
+    if (id.length > 0 && !seen.has(id)) {
+      seen.add(id);
+      resolved.push(id);
+    }
+  }
+  return resolved;
+}
+
 async function syncTransactionTags(
   db: D1Database,
   transactionId: string,
   rawTags: string[]
 ): Promise<void> {
-  const uniqueSlugs = Array.from(
-    new Set(rawTags.map(slugifyTag).filter((s) => s.length > 0))
-  );
+  const uniqueSlugs = await resolveTagIds(db, rawTags);
 
   await db.prepare('DELETE FROM transaction_tags WHERE transaction_id = ?').bind(transactionId).run();
   if (uniqueSlugs.length === 0) return;
@@ -1840,9 +1871,7 @@ export async function createSharedPurchase(
     ? (normalizeMonth(input.first_installment_month) ?? defaultFirstMonth)
     : null;
 
-  const uniqueTags = Array.from(
-    new Set((input.tags ?? []).map(slugifyTag).filter((s) => s.length > 0))
-  );
+  const uniqueTags = await resolveTagIds(db, input.tags ?? []);
 
   const linkedGroupId = shortId();
   const createdAt = new Date().toISOString();

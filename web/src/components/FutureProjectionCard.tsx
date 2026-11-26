@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CalendarClock, Pause, Pencil, Play, Plus, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { AccountWithBalance, FutureProjection, RecurringItem } from '../types';
+import { buildProjectionMonthMeta, buildProjectionTitle } from '../utils/dashboardViewModel';
 
 interface Props {
   projection: FutureProjection;
@@ -53,11 +54,7 @@ export function FutureProjectionCard({
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const firstMonth = projection.months[0];
   const covered = projection.next_month_coverage_delta >= 0;
-  const savingsAccounts = accounts.filter((a) => a.type === 'savings');
-  const projectionTitle =
-    savingsAccounts.length === 1
-      ? `Próximos meses vs. ${savingsAccounts[0].name}`
-      : 'Próximos meses vs. Reservas / Ahorros';
+  const projectionTitle = buildProjectionTitle(accounts);
 
   return (
     <div className="flex flex-col gap-4 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
@@ -96,14 +93,7 @@ export function FutureProjectionCard({
               {formatMoney(m.total_committed)}
             </p>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Cuotas: {formatMoney(m.installments_total_amount)} · Fijos:{' '}
-              {formatMoney(m.recurring_total_amount)}
-              {m.recurring_usd_total_amount > 0
-                ? ` · USD: ${formatMoney(m.recurring_usd_total_amount, 'USD')}`
-                : ''}
-              {(m.recurring_brl_total_amount ?? 0) > 0
-                ? ` · BRL: ${formatMoney(m.recurring_brl_total_amount ?? 0, 'BRL')}`
-                : ''}
+              {buildProjectionMonthMeta(m)}
             </p>
           </div>
         ))}

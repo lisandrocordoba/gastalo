@@ -1,6 +1,7 @@
 import { CreditCard, Landmark, Wallet } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { AccountWithBalance } from '../types';
+import { buildCurrentStatusMetrics } from '../utils/dashboardViewModel';
 
 interface Props {
   accounts: AccountWithBalance[];
@@ -8,58 +9,20 @@ interface Props {
 }
 
 export function CurrentStatusBar({ accounts, thirdPartyPending }: Props) {
-  const liquidArs = accounts
-    .filter((a) => a.type !== 'credit_card' && a.currency === 'ARS')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const liquidUsd = accounts
-    .filter((a) => a.type !== 'credit_card' && a.currency === 'USD')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const liquidBrl = accounts
-    .filter((a) => a.type !== 'credit_card' && a.currency === 'BRL')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const cardDebtArs = accounts
-    .filter((a) => a.type === 'credit_card' && a.currency === 'ARS')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const cardDebtUsd = accounts
-    .filter((a) => a.type === 'credit_card' && a.currency === 'USD')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const cardDebtBrl = accounts
-    .filter((a) => a.type === 'credit_card' && a.currency === 'BRL')
-    .reduce((sum, a) => sum + a.balance, 0);
-
-  const netWorthArs = liquidArs + cardDebtArs;
-  const netWorthUsd = liquidUsd + cardDebtUsd;
-  const netWorthBrl = liquidBrl + cardDebtBrl;
-
-  const liquidForeignParts = [
-    liquidUsd !== 0 ? `USD: ${formatMoney(liquidUsd, 'USD')}` : null,
-    liquidBrl !== 0 ? `BRL: ${formatMoney(liquidBrl, 'BRL')}` : null,
-  ].filter(Boolean);
-
-  const cardDebtForeignParts = [
-    cardDebtUsd !== 0 ? `USD: ${formatMoney(cardDebtUsd, 'USD')}` : null,
-    cardDebtBrl !== 0 ? `BRL: ${formatMoney(cardDebtBrl, 'BRL')}` : null,
-  ].filter(Boolean);
-
-  const netWorthSubtitleParts = [
-    thirdPartyPending > 0 ? `Por cobrar de terceros: ${formatMoney(thirdPartyPending)}` : null,
-    netWorthUsd !== 0 ? `USD: ${formatMoney(netWorthUsd, 'USD')}` : null,
-    netWorthBrl !== 0 ? `BRL: ${formatMoney(netWorthBrl, 'BRL')}` : null,
-  ].filter(Boolean);
+  const {
+    liquidArs,
+    cardDebtArs,
+    netWorthArs,
+    liquiditySubtitle,
+    cardDebtSubtitle,
+    netWorthSubtitle,
+  } = buildCurrentStatusMetrics(accounts, thirdPartyPending);
 
   const cards = [
     {
       label: 'Liquidez disponible ARS',
       value: formatMoney(liquidArs),
-      subtitle:
-        liquidForeignParts.length > 0
-          ? liquidForeignParts.join(' · ')
-          : 'Cuentas líquidas + Reservas',
+      subtitle: liquiditySubtitle,
       icon: Landmark,
       color: liquidArs >= 0 ? 'text-[#38BDF8]' : 'text-rose-400',
       bg: 'bg-[#009EE3]/10 border-[#009EE3]/30',
@@ -67,10 +30,7 @@ export function CurrentStatusBar({ accounts, thirdPartyPending }: Props) {
     {
       label: 'Deuda total en TC ARS',
       value: formatMoney(cardDebtArs),
-      subtitle:
-        cardDebtForeignParts.length > 0
-          ? cardDebtForeignParts.join(' · ')
-          : 'Saldo acumulado en tarjetas',
+      subtitle: cardDebtSubtitle,
       icon: CreditCard,
       color: cardDebtArs < 0 ? 'text-rose-400' : 'text-zinc-100',
       bg: 'bg-zinc-800/80 border-zinc-700',
@@ -78,10 +38,7 @@ export function CurrentStatusBar({ accounts, thirdPartyPending }: Props) {
     {
       label: 'Patrimonio neto ARS',
       value: formatMoney(netWorthArs),
-      subtitle:
-        netWorthSubtitleParts.length > 0
-          ? netWorthSubtitleParts.join(' · ')
-          : 'Liquidez menos deuda en TC',
+      subtitle: netWorthSubtitle,
       icon: Wallet,
       color: netWorthArs >= 0 ? 'text-emerald-400' : 'text-rose-400',
       bg: 'bg-emerald-500/10 border-emerald-500/25',
