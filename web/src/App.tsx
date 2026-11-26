@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Download, KeyRound, Plus, RefreshCw } from 'lucide-react';
+import { Download, KeyRound, Plus, RefreshCw } from 'lucide-react';
 import {
   createRecurringItem,
   createSharedPurchase,
@@ -10,6 +10,7 @@ import {
   downloadCsv,
   fetchBootstrap,
   getStoredToken,
+  payCardStatement,
   reconcileAccount,
   setStoredToken,
   UnauthorizedError,
@@ -19,6 +20,9 @@ import {
 } from './api';
 import { AccountsGrid } from './components/AccountsGrid';
 import { CategoryChart } from './components/CategoryChart';
+import { CreditCardsSection } from './components/CreditCardsSection';
+import { CurrentStatusBar } from './components/CurrentStatusBar';
+import { DateRangePicker, getMonthRange, type DateRangeValue } from './components/DateRangePicker';
 import { FutureProjectionCard } from './components/FutureProjectionCard';
 import { MonthlyChart } from './components/MonthlyChart';
 import { SummaryCards } from './components/SummaryCards';
@@ -42,14 +46,12 @@ function todayStr(): string {
   return `${y}-${m}-${d}`;
 }
 
-function shiftMonth(month: string, delta: number): string {
-  const [y, m] = month.split('-').map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
 export function App() {
-  const [month, setMonth] = useState(currentMonthStr);
+  const [dateRange, setDateRange] = useState<DateRangeValue>(() => {
+    const now = new Date();
+    return getMonthRange(now.getFullYear(), now.getMonth() + 1);
+  });
+  const [statementMonth, setStatementMonth] = useState(currentMonthStr);
   const [data, setData] = useState<BootstrapResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [needsAuth, setNeedsAuth] = useState(false);
@@ -57,25 +59,36 @@ export function App() {
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
+  const [cardPurchasesOnly, setCardPurchasesOnly] = useState(false);
 
-  const loadData = useCallback(async (targetMonth: string) => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await fetchBootstrap(targetMonth);
-      setData(res);
-      setNeedsAuth(false);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        setNeedsAuth(true);
-      } else {
-        setError(err instanceof Error ? err.message : 'Error cargando datos');
+  const loadData = useCallback(
+    async (range: DateRangeValue, activeStatementMonth: string) => {
+      setLoading(true);
+      setError('');
+      try {
+        const res = await fetchBootstrap({
+          from: range.from,
+          to: range.to,
+          basis: 'cash',
+          statementMonth: activeStatementMonth,
+        });
+        setData(res);
+        setNeedsAuth(false);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          setNeedsAuth(true);
+        } else {
+          setError(err instanceof Error ? err.message : 'Error cargando datos');
+        }
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     window.Telegram?.WebApp?.ready?.();
@@ -83,13 +96,27 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void loadData(month);
-  }, [month, loadData]);
+    void loadData(dateRange, statementMonth);
+  }, [dateRange, statementMonth, loadData]);
 
   const handleAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setStoredToken(tokenInput.trim());
-    void loadData(month);
+    void loadData(dateRange, statementMonth);
+  };
+
+  const handleSelectAccount = (accountId: string) => {
+    setSelectedAccount(accountId);
+    if (accountId) {
+      setCardPurchasesOnly(false);
+    }
+  };
+
+  const handleToggleCardPurchasesOnly = (next: boolean) => {
+    setCardPurchasesOnly(next);
+    if (next) {
+      setSelectedAccount('');
+    }
   };
 
   if (needsAuth) {
@@ -127,37 +154,29 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-zinc-950 pb-12 text-zinc-100">
-      <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md">
+      <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div>
             <h1 className="text-lg font-bold tracking-tight text-white">Gasti Personal</h1>
             <p className="text-xs text-zinc-400">
-              Mercado Pago · Reservas · TC BBVA · TC MP · Efectivo
+              Mercado Pago · Reservas · Efectivo · Tarjetas de Crédito
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex items-center rounded-xl border border-zinc-800 bg-zinc-900 px-1 py-1">
-              <button
-                type="button"
-                onClick={() => setMonth((m) => shiftMonth(m, -1))}
-                className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <span className="px-2.5 text-xs font-semibold text-zinc-200">{month}</span>
-              <button
-                type="button"
-                onClick={() => setMonth((m) => shiftMonth(m, 1))}
-                className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <DateRangePicker
+              value={dateRange}
+              onChange={(next) => {
+                setDateRange(next);
+                if (next.mode === 'months') {
+                  setStatementMonth(next.from.slice(0, 7));
+                }
+              }}
+            />
 
             <button
               type="button"
-              onClick={() => void loadData(month)}
+              onClick={() => void loadData(dateRange, statementMonth)}
               title="Actualizar"
               className="rounded-xl border border-zinc-800 bg-zinc-900 p-2 text-zinc-300 hover:bg-zinc-800"
             >
@@ -166,7 +185,7 @@ export function App() {
 
             <button
               type="button"
-              onClick={() => void downloadCsv(month)}
+              onClick={() => void downloadCsv(dateRange.from, dateRange.to)}
               title="Exportar CSV"
               className="hidden items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:inline-flex"
             >
@@ -191,29 +210,65 @@ export function App() {
 
       <main className="mx-auto mt-5 max-w-6xl space-y-6 px-4">
         {error && (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
+          <div
+            role="alert"
+            className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300"
+          >
             {error}
           </div>
         )}
 
         {data ? (
           <>
-            <SummaryCards summary={data.summary} />
+            <SummaryCards
+              summary={data.summary}
+              periodLabel={dateRange.label}
+              cardPurchasesFilterActive={cardPurchasesOnly}
+              onToggleCardPurchasesFilter={() =>
+                handleToggleCardPurchasesOnly(!cardPurchasesOnly)
+              }
+            />
+
+            <CurrentStatusBar
+              accounts={data.accounts}
+              thirdPartyPending={data.summary.third_party_pending}
+            />
 
             <AccountsGrid
               accounts={data.accounts}
+              selectedAccount={selectedAccount}
+              onSelectAccount={handleSelectAccount}
               onSaveInitialBalance={async (id, initial) => {
                 await updateAccountInitialBalance(id, initial);
-                await loadData(month);
+                await loadData(dateRange, statementMonth);
               }}
               onReconcileBalance={async (id, realBalance) => {
                 await reconcileAccount(id, realBalance);
-                await loadData(month);
+                await loadData(dateRange, statementMonth);
+              }}
+            />
+
+            <CreditCardsSection
+              statementMonth={statementMonth}
+              onChangeStatementMonth={setStatementMonth}
+              statements={data.cardStatements}
+              accounts={data.accounts}
+              categories={data.categories}
+              defaultPayDate={todayStr()}
+              selectedAccount={selectedAccount}
+              onSelectAccount={handleSelectAccount}
+              onPayStatement={async (cardId, payload) => {
+                await payCardStatement(cardId, payload);
+                await loadData(dateRange, statementMonth);
               }}
             />
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <CategoryChart data={data.summary.by_category} />
+              <CategoryChart
+                data={data.summary.by_category}
+                selectedCategory={selectedCategory}
+                onSelectCategory={setSelectedCategory}
+              />
               <MonthlyChart data={data.monthlyHistory} />
             </div>
 
@@ -232,15 +287,15 @@ export function App() {
                   categories={data.categories}
                   onCreateRecurring={async (input) => {
                     await createRecurringItem(input);
-                    await loadData(month);
+                    await loadData(dateRange, statementMonth);
                   }}
                   onToggleRecurring={async (id, active) => {
                     await updateRecurringItem(id, { active });
-                    await loadData(month);
+                    await loadData(dateRange, statementMonth);
                   }}
                   onDeleteRecurring={async (id) => {
                     await deleteRecurringItem(id);
-                    await loadData(month);
+                    await loadData(dateRange, statementMonth);
                   }}
                 />
               </div>
@@ -251,15 +306,21 @@ export function App() {
               accounts={data.accounts}
               categories={data.categories}
               tags={data.tags}
+              selectedAccount={selectedAccount}
+              onSelectAccount={handleSelectAccount}
+              selectedCategory={selectedCategory}
+              onSelectCategory={setSelectedCategory}
               selectedTag={selectedTag}
               onSelectTag={setSelectedTag}
+              cardPurchasesOnly={cardPurchasesOnly}
+              onToggleCardPurchasesOnly={handleToggleCardPurchasesOnly}
               onEdit={(tx) => {
                 setEditingTx(tx);
                 setModalOpen(true);
               }}
               onDelete={async (id) => {
                 await deleteTransaction(id);
-                await loadData(month);
+                await loadData(dateRange, statementMonth);
               }}
             />
           </>
@@ -279,7 +340,7 @@ export function App() {
           onClose={() => setModalOpen(false)}
           onCreateTag={async (name) => {
             const res = await createTag(name);
-            await loadData(month);
+            await loadData(dateRange, statementMonth);
             return res.tag;
           }}
           onSubmit={async (payload) => {
@@ -288,11 +349,11 @@ export function App() {
             } else {
               await createTransaction(payload);
             }
-            await loadData(month);
+            await loadData(dateRange, statementMonth);
           }}
           onSubmitShared={async (payload) => {
             await createSharedPurchase(payload);
-            await loadData(month);
+            await loadData(dateRange, statementMonth);
           }}
         />
       )}

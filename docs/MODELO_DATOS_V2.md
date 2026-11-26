@@ -46,7 +46,8 @@ Se elimina la restricción de 3 cuentas de la versión gratuita de Wallet:
 | `uber_taxi` | 🚕 Uber / Taxi | Viajes en Uber, Cabify, DiDi, taxi. |
 | `transporte_publico` | 🚌 Transporte público | Carga SUBE, colectivo, subte, tren. |
 | `auto` | 🚗 Auto | Nafta, estacionamiento, garage/trapito, patente, lavado, mantenimiento. |
-| `suscripciones_servicios` | 📱 Suscripciones y Servicios | Spotify, YouTube Premium, Nivel 6 ML, Tuenti, GamePass, internet/servicios. |
+| `servicios` | 💡 Servicios | Gastos de la casa: luz, agua, gas, internet/wifi, expensas. |
+| `suscripciones` | 📱 Suscripciones | Apps y servicios personales: Spotify, YouTube Premium, Google AI, Nivel 6 ML, GamePass, Tuenti. |
 | `educacion` | 📚 Educación | Clases de inglés, libros, cursos, papelería/fotocopias. |
 | `salud` | 💊 Salud | Médico, odontología, farmacia, remedios, kinesiología. |
 | `cuidado_personal` | 💇 Cuidado personal | Peluquería, desodorantes, higiene personal. |
@@ -102,19 +103,25 @@ Un movimiento puede tener **0, 1 o varias** etiquetas:
 - **`transaction_tags`**: `(transaction_id TEXT NOT NULL, tag_id TEXT NOT NULL, PRIMARY KEY (transaction_id, tag_id))`
 - **`recurring_items`**: `(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('expense','income')), amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'ARS', account_id TEXT NOT NULL, category_id TEXT, day_of_month INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)`
 
-### Regla exacta de impacto contable por `type`
+### Regla exacta de impacto contable por `type` (Opción B — Flujo Real de Pago TC)
 
-| `type` | Saldo `account_id` | Saldo `to_account_id` | Gastos consumo | Ingresos | Invertido | Saldo terceros (por cobrar) | Cuotas futuras |
+1. **Tarjetas de Crédito como entidad propia:** `TC BBVA`, `TC BBVA USD` y `TC MP` registran la **deuda total real** al instante de pasar el plástico (ej. Dentista `-$632.640` en 6 cuotas).
+2. **Invariante de flujo real (`basis = 'cash'`, por defecto):**
+   - Mientras un resumen de tarjeta está **`⏳ Pendiente`**, la plata sigue en `Mercado Pago`, la deuda sigue en la tarjeta y el gasto **todavía no impacta** en los Gastos del Mes.
+   - El día en que registrás el pago del resumen desde `Mercado Pago` (`[💳 Registrar pago resumen YYYY-MM]`), ese único pago (`transfer MP → TC` con `statement_month`) descuenta tu saldo de `MP`, descuenta tu deuda de `TC`, marca el resumen como **`✅ Pagado`** e imputa el monto pagado a los gastos de ese mes **desglosado por las categorías de las cuotas incluidas** (excluyendo porciones `third_party`).
+   - Se mantiene un selector opcional `Compra total (Devengado)` en el Dashboard para auditar compras en su fecha original.
+
+| `type` | Saldo `account_id` | Saldo `to_account_id` | Gastos consumo (`cash`) | Ingresos | Invertido | Saldo terceros (por cobrar) | Cuotas / Resumen TC |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `expense` | `- amount` | — | `+ amount` | `0` | `0` | `0` | Sí (si `installments_total > 1`) |
-| `income` | `+ amount` | — | `0` | `+ amount` | `0` | `0` | `0` |
-| `transfer` | `- amount` | `+ amount` | `0` | `0` | `0` | `0` | `0` |
-| `investment` | `- amount` | — | `0` | `0` | `+ amount` | `0` | `0` |
-| `third_party` | `- amount` | — | `0` | `0` | `0` | `+ amount` *(te deben)* | Sí (si `installments_total > 1`) |
-| `third_party_repayment` | `+ amount` | — | `0` | `0` | `0` | `- amount` *(saldado)* | `0` |
-| `adjustment` | `± amount` *(según signo/dirección)* | — | `0` | `0` | `0` | `0` | `0` |
-
-> **Nota clave:** En `credit_card`, tanto `expense` como `third_party` suman al total de la cuota del resumen porque el banco te va a cobrar el **100%** del resumen de la tarjeta, independientemente de quién te devolvió su parte antes.
+| `expense` (en cuenta líquida) | `- amount` | — | `+ amount` | `0` | `0` | `0` | — |
+| `expense` (en `credit_card`) | `- amount` | — | `0` *(impacta al pagar resumen)* | `0` | `0` | `0` | Sí (`1..N` cuotas) |
+| `income` | `+ amount` | — | `0` | `+ amount` | `0` | `0` | — |
+| `transfer` (entre cuentas líquidas) | `- amount` | `+ amount` | `0` | `0` | `0` | `0` | — |
+| `transfer` (`MP → credit_card`) | `- amount` | `+ amount` | `+ own_paid` *(desglosado por cuotas del resumen)* | `0` | `0` | `0` | Marca resumen `paid` |
+| `investment` | `- amount` | — | `0` | `0` | `+ amount` | `0` | — |
+| `third_party` | `- amount` | — | `0` | `0` | `0` | `+ amount` *(te deben)* | Sí (en TC suma al total a pagar al banco) |
+| `third_party_repayment` | `+ amount` | — | `0` | `0` | `0` | `- amount` *(saldado)* | — |
+| `adjustment` | `± amount` | — | `0` | `0` | `0` | `0` | — |
 
 ---
 

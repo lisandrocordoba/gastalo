@@ -31,9 +31,9 @@ const EXPENSE_CATEGORY_MAP = {
   Estacionamiento: 'auto',
   'Mantenimiento de vehículos': 'auto',
   'Seguro de vehículo': 'auto',
-  'Software, apps, juegos': 'suscripciones_servicios',
-  'Teléfono, móvil': 'suscripciones_servicios',
-  'TV, Streaming': 'suscripciones_servicios',
+  'Software, apps, juegos': 'suscripciones',
+  'Teléfono, móvil': 'suscripciones',
+  'TV, Streaming': 'suscripciones',
   'Educación, desarrollo personal': 'educacion',
   'Papelería, herramientas': 'educacion',
   'Cuidado de salud, doctor': 'salud',
@@ -46,7 +46,7 @@ const EXPENSE_CATEGORY_MAP = {
   'Electrónica, accesorios': 'compras_ropa',
   Compras: 'compras_ropa',
   'Joyería, accesorios': 'compras_ropa',
-  Vivienda: 'compras_ropa',
+  Vivienda: 'servicios',
   'Mascotas, animales': 'mascotas',
 };
 

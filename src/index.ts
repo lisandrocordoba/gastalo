@@ -9,12 +9,13 @@ import {
   deleteTransaction,
   getFutureProjection,
   getMonthlyHistory,
-  getMonthSummary,
+  getPeriodSummary,
   listAccountsWithBalances,
   listCategories,
   listRecurringItems,
   listTags,
   listTransactions,
+  payCardStatement,
   reconcileAccountBalance,
   updateAccountInitialBalance,
   updateRecurringItem,
@@ -22,13 +23,15 @@ import {
 } from './db';
 import { handleTelegramUpdate, type TelegramUpdate } from './telegram';
 import type {
+  AccountingBasis,
   Env,
+  PayStatementInput,
   RecurringItemInput,
   SharedPurchaseInput,
   TransactionInput,
   TransactionType,
 } from './types';
-import { addMonths, currentMonthInTimezone, todayInTimezone } from './utils';
+import { addMonths, currentMonthInTimezone, getMonthDateRange, todayInTimezone } from './utils';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -78,21 +81,30 @@ app.get('/api/bootstrap', async (c) => {
   const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
   const currentMonth = currentMonthInTimezone(tz);
   const month = c.req.query('month') || currentMonth;
+  const fallbackRange = getMonthDateRange(month);
+  const from = c.req.query('from') || fallbackRange.start;
+  const to = c.req.query('to') || fallbackRange.end;
+  const basis: AccountingBasis = c.req.query('basis') === 'accrual' ? 'accrual' : 'cash';
+  const statementMonth = c.req.query('statementMonth') || currentMonth;
   const nextMonth = addMonths(currentMonth, 1);
 
   const [categories, tags, summary, monthlyHistory, transactions, recurringItems, projection] =
     await Promise.all([
       listCategories(c.env.DB),
       listTags(c.env.DB),
-      getMonthSummary(c.env.DB, month),
-      getMonthlyHistory(c.env.DB, month, 6),
-      listTransactions(c.env.DB, { month, limit: 200 }),
+      getPeriodSummary(c.env.DB, { from, to, basis, statementMonth }),
+      getMonthlyHistory(c.env.DB, { from, to, basis }),
+      listTransactions(c.env.DB, { from, to, limit: 2500 }),
       listRecurringItems(c.env.DB),
       getFutureProjection(c.env.DB, nextMonth, 3),
     ]);
 
   return c.json({
-    month,
+    month: from.slice(0, 7),
+    from,
+    to,
+    basis,
+    statementMonth,
     accounts: summary.accounts,
     categories,
     tags,
@@ -101,6 +113,7 @@ app.get('/api/bootstrap', async (c) => {
     transactions,
     recurringItems,
     projection,
+    cardStatements: summary.card_statements,
   });
 });
 
@@ -108,12 +121,14 @@ app.get('/api/transactions', async (c) => {
   const rawType = c.req.query('type') as TransactionType | undefined;
   const txs = await listTransactions(c.env.DB, {
     month: c.req.query('month') || undefined,
+    from: c.req.query('from') || undefined,
+    to: c.req.query('to') || undefined,
     accountId: c.req.query('accountId') || undefined,
     categoryId: c.req.query('categoryId') || undefined,
     tagId: c.req.query('tagId') || undefined,
     type: rawType && VALID_TX_TYPES.has(rawType) ? rawType : undefined,
     search: c.req.query('search') || undefined,
-    limit: c.req.query('limit') ? Number(c.req.query('limit')) : 200,
+    limit: c.req.query('limit') ? Number(c.req.query('limit')) : 500,
   });
   return c.json({ transactions: txs });
 });
@@ -144,6 +159,7 @@ app.post('/api/transactions', async (c) => {
     source: 'web',
     installments_total: body.installments_total ?? null,
     first_installment_month: body.first_installment_month ?? null,
+    statement_month: body.statement_month ?? null,
     third_party_name: body.third_party_name ?? null,
     linked_group_id: body.linked_group_id ?? null,
     tags: Array.isArray(body.tags) ? body.tags : undefined,
@@ -237,6 +253,40 @@ app.post('/api/accounts/:id/reconcile', async (c) => {
   }
 });
 
+app.post('/api/cards/:id/pay-statement', async (c) => {
+  const cardId = c.req.param('id');
+  const body = await c.req.json<Partial<PayStatementInput>>();
+  if (
+    !body.statement_month ||
+    !/^\d{4}-\d{2}$/.test(body.statement_month) ||
+    typeof body.amount !== 'number' ||
+    !Number.isFinite(body.amount) ||
+    body.amount < 0
+  ) {
+    return c.json({ error: 'Datos inválidos para pago de resumen' }, 400);
+  }
+  const fees = typeof body.fees_amount === 'number' && body.fees_amount > 0 ? body.fees_amount : 0;
+  if (body.amount + fees <= 0) {
+    return c.json({ error: 'El total a pagar debe ser mayor a 0' }, 400);
+  }
+
+  const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  try {
+    const result = await payCardStatement(c.env.DB, {
+      card_account_id: cardId,
+      statement_month: body.statement_month,
+      from_account_id: body.from_account_id || 'mp',
+      amount: body.amount,
+      fees_amount: fees,
+      occurred_at: body.occurred_at || todayInTimezone(tz),
+      description: body.description,
+    });
+    return c.json(result, 201);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Error al pagar resumen' }, 400);
+  }
+});
+
 app.get('/api/tags', async (c) => {
   const tags = await listTags(c.env.DB);
   return c.json({ tags });
@@ -303,8 +353,10 @@ app.get('/api/projection', async (c) => {
 
 app.get('/api/export.csv', async (c) => {
   const month = c.req.query('month') || undefined;
+  const from = c.req.query('from') || undefined;
+  const to = c.req.query('to') || undefined;
   const [txs, accounts, categories] = await Promise.all([
-    listTransactions(c.env.DB, { month, limit: 500 }),
+    listTransactions(c.env.DB, { month, from, to, limit: 2500 }),
     listAccountsWithBalances(c.env.DB),
     listCategories(c.env.DB),
   ]);
@@ -331,6 +383,7 @@ app.get('/api/export.csv', async (c) => {
     'Descripción',
     'Etiquetas',
     'Cuotas',
+    'Mes Resumen',
     'Tercero',
     'Origen',
   ];
@@ -345,15 +398,17 @@ app.get('/api/export.csv', async (c) => {
     tx.description,
     tx.tags.join('|'),
     tx.installments_total ?? '',
+    tx.statement_month ?? '',
     tx.third_party_name ?? '',
     tx.source,
   ]);
 
   const csv = '\uFEFF' + [header, ...rows].map((r) => r.map(csvEscape).join(',')).join('\n');
+  const suffix = from && to ? `-${from}_${to}` : month ? `-${month}` : '';
   return new Response(csv, {
     headers: {
       'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="gasti-movimientos${month ? `-${month}` : ''}.csv"`,
+      'Content-Disposition': `attachment; filename="gasti-movimientos${suffix}.csv"`,
     },
   });
 });

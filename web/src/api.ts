@@ -1,4 +1,11 @@
-import type { BootstrapResponse, RecurringItem, Tag, Transaction, TransactionType } from './types';
+import type {
+  AccountingBasis,
+  BootstrapResponse,
+  RecurringItem,
+  Tag,
+  Transaction,
+  TransactionType,
+} from './types';
 
 declare global {
   interface Window {
@@ -69,8 +76,19 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function fetchBootstrap(month: string): Promise<BootstrapResponse> {
-  return apiFetch<BootstrapResponse>(`/api/bootstrap?month=${encodeURIComponent(month)}`);
+export function fetchBootstrap(params: {
+  from: string;
+  to: string;
+  basis: AccountingBasis;
+  statementMonth: string;
+}): Promise<BootstrapResponse> {
+  const qs = new URLSearchParams({
+    from: params.from,
+    to: params.to,
+    basis: params.basis,
+    statementMonth: params.statementMonth,
+  });
+  return apiFetch<BootstrapResponse>(`/api/bootstrap?${qs.toString()}`);
 }
 
 export interface CreateTransactionPayload {
@@ -85,6 +103,7 @@ export interface CreateTransactionPayload {
   tags?: string[];
   installments_total?: number | null;
   first_installment_month?: string | null;
+  statement_month?: string | null;
   third_party_name?: string | null;
 }
 
@@ -152,6 +171,23 @@ export function reconcileAccount(
   });
 }
 
+export function payCardStatement(
+  cardId: string,
+  payload: {
+    statement_month: string;
+    from_account_id: string;
+    amount: number;
+    fees_amount?: number;
+    occurred_at: string;
+    description?: string;
+  }
+): Promise<unknown> {
+  return apiFetch(`/api/cards/${encodeURIComponent(cardId)}/pay-statement`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function createTag(name: string, color?: string): Promise<{ tag: Tag }> {
   return apiFetch('/api/tags', {
     method: 'POST',
@@ -198,8 +234,9 @@ export function deleteRecurringItem(id: string): Promise<{ ok: boolean }> {
   });
 }
 
-export async function downloadCsv(month: string): Promise<void> {
-  const res = await fetch(`/api/export.csv?month=${encodeURIComponent(month)}`, {
+export async function downloadCsv(from: string, to: string): Promise<void> {
+  const qs = new URLSearchParams({ from, to });
+  const res = await fetch(`/api/export.csv?${qs.toString()}`, {
     headers: buildHeaders(),
   });
   if (res.status === 401) throw new UnauthorizedError();
@@ -208,7 +245,7 @@ export async function downloadCsv(month: string): Promise<void> {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `gasti-movimientos-${month}.csv`;
+  a.download = `gasti-movimientos-${from}_${to}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();

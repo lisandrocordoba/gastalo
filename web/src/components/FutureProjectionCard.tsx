@@ -32,7 +32,7 @@ export function FutureProjectionCard({
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [accountId, setAccountId] = useState('mp');
-  const [categoryId, setCategoryId] = useState('suscripciones_servicios');
+  const [categoryId, setCategoryId] = useState('suscripciones');
   const [dayOfMonth, setDayOfMonth] = useState('5');
   const [saving, setSaving] = useState(false);
 

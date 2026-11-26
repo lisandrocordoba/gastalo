@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { isAuthorizedRequest, verifyTelegramInitData } from '../src/auth';
 import {
   computeAccountBalances,
+  computeCardStatements,
   computeFutureProjection,
+  computePeriodMetrics,
   computeThirdPartyBalances,
 } from '../src/db';
 import { sanitizeParsedIntent } from '../src/gemini';
 import { extractInstallments, mapWalletRows } from '../scripts/wallet-mapper.mjs';
-import type { Account, RecurringItem } from '../src/types';
+import type { Account, Category, RecurringItem, Tag, Transaction } from '../src/types';
 import {
   addMonths,
   arrayBufferToBase64,
@@ -483,5 +485,184 @@ describe('wallet .xls mapper', () => {
     for (const audit of result.balanceAudit) {
       expect(audit.diff).toBe(0);
     }
+  });
+
+  it('maps Streaming/Apps to suscripciones and Vivienda to servicios', () => {
+    const baseTs = Date.parse('2026-06-10T12:00:00Z');
+    const result = mapWalletRows([
+      {
+        account: 'Mercado Pago',
+        category: 'Software, apps, juegos',
+        currency: 'ARS',
+        amount: -3500,
+        type: 'Gastos',
+        note: 'youtube premium',
+        labels: '',
+        payee: '',
+        transfer: 0,
+        dateIso: '2026-06-10',
+        isoTimestamp: '2026-06-10T12:00:00.000Z',
+        timestampMs: baseTs,
+      },
+      {
+        account: 'Mercado Pago',
+        category: 'Vivienda',
+        currency: 'ARS',
+        amount: -20000,
+        type: 'Gastos',
+        note: 'wifi casa',
+        labels: 'casa',
+        payee: '',
+        transfer: 0,
+        dateIso: '2026-06-10',
+        isoTimestamp: '2026-06-10T12:00:00.000Z',
+        timestampMs: baseTs,
+      },
+    ]);
+    const byDesc = Object.fromEntries(result.transactions.map((t) => [t.description, t]));
+    expect(byDesc['youtube premium'].category_id).toBe('suscripciones');
+    expect(byDesc['wifi casa'].category_id).toBe('servicios');
+  });
+});
+
+describe('credit card Opción B (cash flow on statement payment)', () => {
+  const accounts: Account[] = [
+    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 1000000, is_default: 1, created_at: '2026-01-01' },
+    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, is_default: 0, created_at: '2026-01-01' },
+  ];
+  const categories: Category[] = [
+    { id: 'salud', name: 'Salud', icon: '💊', type: 'expense', color: '#26A69A' },
+    { id: 'regalos', name: 'Regalos', icon: '🎁', type: 'expense', color: '#4FC3F7' },
+    { id: 'otros', name: 'Otros / Trámites', icon: '📦', type: 'expense', color: '#9E9E9E' },
+  ];
+  const tags: Tag[] = [{ id: 'familia', name: 'familia', color: '#64DD17' }];
+
+  const makeTx = (partial: Partial<Transaction> & Pick<Transaction, 'id' | 'type' | 'amount' | 'account_id' | 'description' | 'occurred_at'>): Transaction => ({
+    currency: 'ARS',
+    to_account_id: null,
+    category_id: null,
+    source: 'test',
+    raw_input: null,
+    telegram_message_id: null,
+    installments_total: null,
+    first_installment_month: null,
+    statement_month: null,
+    third_party_name: null,
+    linked_group_id: null,
+    tags: [],
+    created_at: '2026-01-01T00:00:00Z',
+    ...partial,
+  });
+
+  it('keeps card purchase out of April cash expenses and reflects exact paid installment in May without duplication', () => {
+    const txsBeforePayment: Transaction[] = [
+      makeTx({
+        id: 'dentist',
+        type: 'expense',
+        amount: 632640,
+        account_id: 'bbva_credito',
+        category_id: 'salud',
+        description: 'Dental system',
+        occurred_at: '2026-04-23',
+        installments_total: 6,
+        first_installment_month: '2026-05',
+      }),
+      makeTx({
+        id: 'gift_own',
+        type: 'expense',
+        amount: 22000,
+        account_id: 'bbva_credito',
+        category_id: 'regalos',
+        description: 'Crocs papá (mi parte)',
+        occurred_at: '2026-04-25',
+        installments_total: 2,
+        first_installment_month: '2026-05',
+        tags: ['familia'],
+      }),
+      makeTx({
+        id: 'gift_jere',
+        type: 'third_party',
+        amount: 22000,
+        account_id: 'bbva_credito',
+        description: 'Crocs papá (parte Jere)',
+        occurred_at: '2026-04-25',
+        installments_total: 2,
+        first_installment_month: '2026-05',
+        third_party_name: 'Jere',
+      }),
+    ];
+
+    // April in cash mode: $0 card expenses, $654,640 own card purchases swiped, card debt is full -676,640
+    const aprilCash = computePeriodMetrics(accounts, txsBeforePayment, categories, tags, {
+      from: '2026-04-01',
+      to: '2026-04-30',
+      basis: 'cash',
+      statementMonth: '2026-04',
+    });
+    expect(aprilCash.expense).toBe(0);
+    expect(aprilCash.card_purchases).toBe(654640);
+    expect(aprilCash.card_purchases_usd).toBe(0);
+    expect(aprilCash.accounts.find((a) => a.id === 'mp')?.balance).toBe(1000000);
+    expect(aprilCash.accounts.find((a) => a.id === 'bbva_credito')?.balance).toBe(-676640);
+
+    // April in accrual mode: shows own purchases (632640 + 22000 = 654640)
+    const aprilAccrual = computePeriodMetrics(accounts, txsBeforePayment, categories, tags, {
+      from: '2026-04-01',
+      to: '2026-04-30',
+      basis: 'accrual',
+      statementMonth: '2026-04',
+    });
+    expect(aprilAccrual.expense).toBe(654640);
+
+    // May statement before paying: pending 105440 + 11000 (own) + 11000 (Jere) = 127440
+    const mayPending = computeCardStatements(accounts, txsBeforePayment, '2026-05')[0];
+    expect(mayPending.status).toBe('pending');
+    expect(mayPending.own_total).toBe(116440);
+    expect(mayPending.third_party_total).toBe(11000);
+    expect(mayPending.total_due).toBe(127440);
+
+    // Before May 5 payment, May cash expense is still 0
+    const mayBeforePay = computePeriodMetrics(accounts, txsBeforePayment, categories, tags, {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+    expect(mayBeforePay.expense).toBe(0);
+
+    // User pays May statement on 2026-05-05 from MP
+    const txsAfterPayment: Transaction[] = [
+      ...txsBeforePayment,
+      makeTx({
+        id: 'pay_may',
+        type: 'transfer',
+        amount: 127440,
+        account_id: 'mp',
+        to_account_id: 'bbva_credito',
+        description: 'Pago resumen TC BBVA 2026-05',
+        occurred_at: '2026-05-05',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    const mayAfterPay = computePeriodMetrics(accounts, txsAfterPayment, categories, tags, {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+
+    // MP decreased by 127440, BBVA debt decreased by 127440 -> -549200
+    expect(mayAfterPay.accounts.find((a) => a.id === 'mp')?.balance).toBe(872560);
+    expect(mayAfterPay.accounts.find((a) => a.id === 'bbva_credito')?.balance).toBe(-549200);
+    // Personal cash expense equals own share only (105440 Salud + 11000 Regalos = 116440)
+    expect(mayAfterPay.expense).toBe(116440);
+    expect(mayAfterPay.card_purchases).toBe(0);
+    expect(mayAfterPay.by_category.map((c) => [c.category_id, c.total])).toEqual([
+      ['salud', 105440],
+      ['regalos', 11000],
+    ]);
+    expect(mayAfterPay.by_tag.map((t) => [t.tag_id, t.total])).toEqual([['familia', 11000]]);
+    expect(mayAfterPay.card_statements[0].status).toBe('paid');
   });
 });

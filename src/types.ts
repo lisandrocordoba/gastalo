@@ -14,6 +14,8 @@ export interface Env {
 
 export type AccountType = 'wallet' | 'savings' | 'credit_card' | 'cash';
 
+export type AccountingBasis = 'cash' | 'accrual';
+
 export type TransactionType =
   | 'expense'
   | 'income'
@@ -68,6 +70,7 @@ export interface Transaction {
   telegram_message_id: number | null;
   installments_total: number | null;
   first_installment_month: string | null;
+  statement_month: string | null;
   third_party_name: string | null;
   linked_group_id: string | null;
   tags: string[];
@@ -89,6 +92,7 @@ export interface TransactionInput {
   telegram_message_id?: number | null;
   installments_total?: number | null;
   first_installment_month?: string | null;
+  statement_month?: string | null;
   third_party_name?: string | null;
   linked_group_id?: string | null;
   tags?: string[];
@@ -155,10 +159,54 @@ export interface ThirdPartyBalance {
   pending: number;
 }
 
+export interface CardStatementItem {
+  transaction_id: string;
+  description: string;
+  type: 'expense' | 'third_party';
+  category_id: string | null;
+  tags: string[];
+  installment_number: number;
+  installments_total: number;
+  installment_amount: number;
+  third_party_name: string | null;
+  occurred_at: string;
+}
+
+export interface CardStatement {
+  account_id: string;
+  account_name: string;
+  currency: string;
+  card_debt: number;
+  statement_month: string;
+  total_due: number;
+  own_total: number;
+  third_party_total: number;
+  status: 'pending' | 'paid';
+  paid_transaction_id: string | null;
+  paid_at: string | null;
+  paid_amount: number | null;
+  items: CardStatementItem[];
+}
+
+export interface PayStatementInput {
+  card_account_id: string;
+  statement_month: string;
+  from_account_id: string;
+  amount: number;
+  fees_amount?: number;
+  occurred_at: string;
+  description?: string;
+}
+
 export interface MonthSummary {
   month: string;
+  from: string;
+  to: string;
+  basis: AccountingBasis;
   income: number;
   expense: number;
+  card_purchases: number;
+  card_purchases_usd: number;
   investment: number;
   net: number;
   net_after_investment: number;
@@ -168,6 +216,7 @@ export interface MonthSummary {
   third_party_pending: number;
   third_party_by_person: ThirdPartyBalance[];
   accounts: AccountWithBalance[];
+  card_statements: CardStatement[];
 }
 
 export interface MonthlyHistoryPoint {

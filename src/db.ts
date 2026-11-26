@@ -1,12 +1,16 @@
 import type {
   Account,
   AccountWithBalance,
+  AccountingBasis,
+  CardStatement,
+  CardStatementItem,
   Category,
   CategoryBreakdown,
   FutureProjection,
   MonthProjection,
   MonthSummary,
   MonthlyHistoryPoint,
+  PayStatementInput,
   ProjectedInstallment,
   RecurringItem,
   RecurringItemInput,
@@ -92,6 +96,260 @@ export function computeThirdPartyBalances(
   };
 }
 
+export function computeCardStatements(
+  accounts: Account[],
+  transactions: Transaction[],
+  statementMonth: string
+): CardStatement[] {
+  const balances = computeAccountBalances(accounts, transactions);
+  const balanceMap = new Map(balances.map((a) => [a.id, a.balance]));
+  const cardAccounts = accounts.filter((a) => a.type === 'credit_card');
+
+  return cardAccounts.map((card) => {
+    const items: CardStatementItem[] = [];
+
+    for (const tx of transactions) {
+      if (tx.account_id !== card.id) continue;
+      if (tx.type !== 'expense' && tx.type !== 'third_party') continue;
+
+      if (tx.installments_total && tx.installments_total >= 2) {
+        const firstMonth =
+          tx.first_installment_month && /^\d{4}-\d{2}$/.test(tx.first_installment_month)
+            ? tx.first_installment_month
+            : addMonths(tx.occurred_at.slice(0, 7), 1);
+        const idx = monthDiff(firstMonth, statementMonth);
+        if (idx >= 0 && idx < tx.installments_total) {
+          items.push({
+            transaction_id: tx.id,
+            description: tx.description,
+            type: tx.type,
+            category_id: tx.category_id,
+            tags: tx.tags,
+            installment_number: idx + 1,
+            installments_total: tx.installments_total,
+            installment_amount: round2(tx.amount / tx.installments_total),
+            third_party_name: tx.third_party_name,
+            occurred_at: tx.occurred_at,
+          });
+        }
+      } else {
+        const dueMonth =
+          tx.statement_month && /^\d{4}-\d{2}$/.test(tx.statement_month)
+            ? tx.statement_month
+            : tx.first_installment_month && /^\d{4}-\d{2}$/.test(tx.first_installment_month)
+              ? tx.first_installment_month
+              : addMonths(tx.occurred_at.slice(0, 7), 1);
+
+        if (dueMonth === statementMonth) {
+          items.push({
+            transaction_id: tx.id,
+            description: tx.description,
+            type: tx.type,
+            category_id: tx.category_id,
+            tags: tx.tags,
+            installment_number: 1,
+            installments_total: 1,
+            installment_amount: round2(tx.amount),
+            third_party_name: tx.third_party_name,
+            occurred_at: tx.occurred_at,
+          });
+        }
+      }
+    }
+
+    const ownTotal = round2(
+      items.filter((i) => i.type === 'expense').reduce((s, i) => s + i.installment_amount, 0)
+    );
+    const thirdPartyTotal = round2(
+      items.filter((i) => i.type === 'third_party').reduce((s, i) => s + i.installment_amount, 0)
+    );
+    const totalDue = round2(ownTotal + thirdPartyTotal);
+
+    const paymentTx = transactions.find(
+      (t) =>
+        t.type === 'transfer' &&
+        t.to_account_id === card.id &&
+        t.statement_month === statementMonth
+    );
+
+    return {
+      account_id: card.id,
+      account_name: card.name,
+      currency: card.currency,
+      card_debt: balanceMap.get(card.id) ?? 0,
+      statement_month: statementMonth,
+      total_due: totalDue,
+      own_total: ownTotal,
+      third_party_total: thirdPartyTotal,
+      status: paymentTx ? 'paid' : 'pending',
+      paid_transaction_id: paymentTx?.id ?? null,
+      paid_at: paymentTx?.occurred_at ?? null,
+      paid_amount: paymentTx ? paymentTx.amount : null,
+      items,
+    };
+  });
+}
+
+export function computePeriodMetrics(
+  accounts: Account[],
+  transactions: Transaction[],
+  categories: Category[],
+  tags: Tag[],
+  options: { from: string; to: string; basis: AccountingBasis; statementMonth?: string }
+): MonthSummary {
+  const { from, to, basis } = options;
+  const statementMonth = options.statementMonth ?? to.slice(0, 7);
+  const cardAccountIds = new Set(accounts.filter((a) => a.type === 'credit_card').map((a) => a.id));
+  const statementCache = new Map<string, CardStatement[]>();
+
+  const getCardStatement = (cardId: string, month: string): CardStatement | undefined => {
+    let list = statementCache.get(month);
+    if (!list) {
+      list = computeCardStatements(accounts, transactions, month);
+      statementCache.set(month, list);
+    }
+    return list.find((s) => s.account_id === cardId);
+  };
+
+  let income = 0;
+  let expense = 0;
+  let cardPurchases = 0;
+  let cardPurchasesUsd = 0;
+  let investment = 0;
+  let usdExpense = 0;
+  const catTotals = new Map<string, number>();
+  const tagTotals = new Map<string, number>();
+
+  for (const tx of transactions) {
+    if (tx.occurred_at < from || tx.occurred_at > to) continue;
+
+    if (tx.type === 'income') {
+      if (tx.currency === 'ARS') income += tx.amount;
+    } else if (tx.type === 'investment') {
+      if (tx.currency === 'ARS') investment += tx.amount;
+    } else if (tx.type === 'expense') {
+      const isCard = cardAccountIds.has(tx.account_id);
+      if (isCard) {
+        if (tx.currency === 'ARS') cardPurchases += tx.amount;
+        else if (tx.currency === 'USD') cardPurchasesUsd += tx.amount;
+      }
+      if (basis === 'cash' && isCard) {
+        continue;
+      }
+      if (tx.currency === 'USD') {
+        usdExpense += tx.amount;
+      } else if (tx.currency === 'ARS') {
+        expense += tx.amount;
+        const catId = tx.category_id ?? 'otros';
+        catTotals.set(catId, (catTotals.get(catId) ?? 0) + tx.amount);
+        for (const tagId of tx.tags) {
+          tagTotals.set(tagId, (tagTotals.get(tagId) ?? 0) + tx.amount);
+        }
+      }
+    } else if (
+      basis === 'cash' &&
+      tx.type === 'transfer' &&
+      tx.to_account_id &&
+      cardAccountIds.has(tx.to_account_id)
+    ) {
+      if (tx.currency === 'USD') {
+        usdExpense += tx.amount;
+        continue;
+      }
+      if (tx.currency !== 'ARS') continue;
+
+      if (tx.statement_month) {
+        const statement = getCardStatement(tx.to_account_id, tx.statement_month);
+        if (statement && statement.items.length > 0) {
+          const ownItems = statement.items.filter((i) => i.type === 'expense');
+          const ownSum = round2(ownItems.reduce((s, i) => s + i.installment_amount, 0));
+          const thirdSum = statement.third_party_total;
+          const availableForOwn = Math.max(0, round2(tx.amount - thirdSum));
+          const countedOwn = Math.min(ownSum, availableForOwn);
+          const scale = ownSum > 0 ? countedOwn / ownSum : 0;
+
+          for (const item of ownItems) {
+            const portion = round2(item.installment_amount * scale);
+            if (portion <= 0) continue;
+            expense += portion;
+            const catId = item.category_id ?? 'otros';
+            catTotals.set(catId, (catTotals.get(catId) ?? 0) + portion);
+            for (const tagId of item.tags) {
+              tagTotals.set(tagId, (tagTotals.get(tagId) ?? 0) + portion);
+            }
+          }
+
+          const extra = round2(availableForOwn - ownSum);
+          if (extra > 0.01) {
+            expense += extra;
+            catTotals.set('otros', (catTotals.get('otros') ?? 0) + extra);
+          }
+        } else {
+          expense += tx.amount;
+          catTotals.set('otros', (catTotals.get('otros') ?? 0) + tx.amount);
+        }
+      } else {
+        expense += tx.amount;
+        catTotals.set('otros', (catTotals.get('otros') ?? 0) + tx.amount);
+      }
+    }
+  }
+
+  const catMap = new Map(categories.map((c) => [c.id, c]));
+  const byCategory: CategoryBreakdown[] = Array.from(catTotals.entries())
+    .map(([categoryId, total]) => {
+      const cat = catMap.get(categoryId);
+      return {
+        category_id: categoryId,
+        name: cat?.name ?? 'Otros / Trámites',
+        icon: cat?.icon ?? '📦',
+        color: cat?.color ?? '#9E9E9E',
+        total: round2(total),
+        percentage: expense > 0 ? Math.round((total / expense) * 1000) / 10 : 0,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  const tagMap = new Map(tags.map((t) => [t.id, t]));
+  const byTag: TagBreakdown[] = Array.from(tagTotals.entries())
+    .map(([tagId, total]) => {
+      const tag = tagMap.get(tagId);
+      return {
+        tag_id: tagId,
+        name: tag?.name ?? tagId,
+        color: tag?.color ?? '#71717a',
+        total: round2(total),
+        percentage: expense > 0 ? Math.round((total / expense) * 1000) / 10 : 0,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  const thirdParty = computeThirdPartyBalances(transactions);
+  const accountsWithBalances = computeAccountBalances(accounts, transactions);
+  const cardStatements = computeCardStatements(accounts, transactions, statementMonth);
+
+  return {
+    month: from.slice(0, 7),
+    from,
+    to,
+    basis,
+    income: round2(income),
+    expense: round2(expense),
+    card_purchases: round2(cardPurchases),
+    card_purchases_usd: round2(cardPurchasesUsd),
+    investment: round2(investment),
+    net: round2(income - expense),
+    net_after_investment: round2(income - expense - investment),
+    usd_expense: round2(usdExpense),
+    by_category: byCategory,
+    by_tag: byTag,
+    third_party_pending: thirdParty.total_pending,
+    third_party_by_person: thirdParty.by_person,
+    accounts: accountsWithBalances,
+    card_statements: cardStatements,
+  };
+}
+
 export function computeFutureProjection(
   transactions: Pick<
     Transaction,
@@ -161,16 +419,23 @@ async function hydrateTransactionTags(
   if (rows.length === 0) return [];
 
   const tagMap = new Map<string, string[]>();
-  const chunkSize = 80;
 
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
-    const placeholders = chunk.map(() => '?').join(', ');
+  if (rows.length > 80) {
+    const res = await db
+      .prepare('SELECT transaction_id, tag_id FROM transaction_tags ORDER BY tag_id ASC')
+      .all<{ transaction_id: string; tag_id: string }>();
+    for (const rel of res.results ?? []) {
+      const list = tagMap.get(rel.transaction_id) ?? [];
+      list.push(rel.tag_id);
+      tagMap.set(rel.transaction_id, list);
+    }
+  } else {
+    const placeholders = rows.map(() => '?').join(', ');
     const res = await db
       .prepare(
         `SELECT transaction_id, tag_id FROM transaction_tags WHERE transaction_id IN (${placeholders}) ORDER BY tag_id ASC`
       )
-      .bind(...chunk.map((r) => r.id))
+      .bind(...rows.map((r) => r.id))
       .all<{ transaction_id: string; tag_id: string }>();
 
     for (const rel of res.results ?? []) {
@@ -184,6 +449,27 @@ async function hydrateTransactionTags(
     ...row,
     tags: tagMap.get(row.id) ?? [],
   }));
+}
+
+async function loadAllDataForAnalysis(db: D1Database): Promise<{
+  accounts: Account[];
+  categories: Category[];
+  tags: Tag[];
+  transactions: Transaction[];
+}> {
+  const [accRes, txRes, categories, tags] = await Promise.all([
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, name ASC').all<Account>(),
+    db.prepare('SELECT * FROM transactions ORDER BY occurred_at DESC, created_at DESC').all<RawTransactionRow>(),
+    listCategories(db),
+    listTags(db),
+  ]);
+  const transactions = await hydrateTransactionTags(db, txRes.results ?? []);
+  return {
+    accounts: accRes.results ?? [],
+    categories,
+    tags,
+    transactions,
+  };
 }
 
 async function syncTransactionTags(
@@ -265,6 +551,63 @@ export async function reconcileAccountBalance(
   return { adjustment, accounts: updatedAccounts };
 }
 
+export async function payCardStatement(
+  db: D1Database,
+  input: PayStatementInput
+): Promise<{
+  transfer: Transaction;
+  feesTx: Transaction | null;
+  accounts: AccountWithBalance[];
+  cardStatements: CardStatement[];
+}> {
+  const card = await db
+    .prepare("SELECT * FROM accounts WHERE id = ? AND type = 'credit_card'")
+    .bind(input.card_account_id)
+    .first<Account>();
+  if (!card) {
+    throw new Error('Tarjeta no encontrada');
+  }
+
+  let feesTx: Transaction | null = null;
+  const feesAmount = input.fees_amount && input.fees_amount > 0 ? round2(input.fees_amount) : 0;
+
+  if (feesAmount > 0) {
+    feesTx = await createTransaction(db, {
+      type: 'expense',
+      amount: feesAmount,
+      currency: card.currency,
+      account_id: card.id,
+      category_id: 'otros',
+      description: `Sellos e impuestos resumen ${input.statement_month}`,
+      occurred_at: input.occurred_at,
+      statement_month: input.statement_month,
+      source: 'web_statement_pay',
+    });
+  }
+
+  const totalPaid = round2(input.amount + feesAmount);
+  const transfer = await createTransaction(db, {
+    type: 'transfer',
+    amount: totalPaid,
+    currency: card.currency,
+    account_id: input.from_account_id || 'mp',
+    to_account_id: card.id,
+    description:
+      input.description?.trim() || `Pago resumen ${card.name} ${input.statement_month}`,
+    occurred_at: input.occurred_at,
+    statement_month: input.statement_month,
+    source: 'web_statement_pay',
+  });
+
+  const { accounts, transactions } = await loadAllDataForAnalysis(db);
+  return {
+    transfer,
+    feesTx,
+    accounts: computeAccountBalances(accounts, transactions),
+    cardStatements: computeCardStatements(accounts, transactions, input.statement_month),
+  };
+}
+
 export async function listCategories(db: D1Database): Promise<Category[]> {
   const res = await db.prepare('SELECT * FROM categories ORDER BY type ASC, name ASC').all<Category>();
   return res.results ?? [];
@@ -311,8 +654,8 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
       `INSERT INTO transactions (
         id, type, amount, currency, account_id, to_account_id, category_id,
         description, occurred_at, source, raw_input, telegram_message_id,
-        installments_total, first_installment_month, third_party_name, linked_group_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        installments_total, first_installment_month, statement_month, third_party_name, linked_group_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -329,6 +672,7 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
       input.telegram_message_id ?? null,
       installmentsTotal,
       firstInstallmentMonth,
+      input.statement_month ?? null,
       input.third_party_name ?? null,
       input.linked_group_id ?? null,
       createdAt
@@ -417,6 +761,7 @@ export async function updateTransaction(
       | 'occurred_at'
       | 'installments_total'
       | 'first_installment_month'
+      | 'statement_month'
       | 'third_party_name'
       | 'tags'
     >
@@ -449,6 +794,8 @@ export async function updateTransaction(
     patch.first_installment_month !== undefined
       ? patch.first_installment_month
       : existing.first_installment_month;
+  const nextStatementMonth =
+    patch.statement_month !== undefined ? patch.statement_month : existing.statement_month;
   const nextThirdPartyName =
     patch.third_party_name !== undefined ? patch.third_party_name : existing.third_party_name;
 
@@ -457,7 +804,7 @@ export async function updateTransaction(
       `UPDATE transactions
        SET type = ?, amount = ?, currency = ?, account_id = ?, to_account_id = ?,
            category_id = ?, description = ?, occurred_at = ?,
-           installments_total = ?, first_installment_month = ?, third_party_name = ?
+           installments_total = ?, first_installment_month = ?, statement_month = ?, third_party_name = ?
        WHERE id = ?`
     )
     .bind(
@@ -471,6 +818,7 @@ export async function updateTransaction(
       nextOccurredAt,
       nextInstallmentsTotal,
       nextFirstInstallmentMonth,
+      nextStatementMonth,
       nextThirdPartyName,
       id
     )
@@ -490,6 +838,8 @@ export async function deleteTransaction(db: D1Database, id: string): Promise<boo
 
 export interface TransactionFilters {
   month?: string;
+  from?: string;
+  to?: string;
   accountId?: string;
   categoryId?: string;
   tagId?: string;
@@ -505,7 +855,10 @@ export async function listTransactions(
   const conditions: string[] = [];
   const bindings: unknown[] = [];
 
-  if (filters.month) {
+  if (filters.from && filters.to) {
+    conditions.push('t.occurred_at >= ? AND t.occurred_at <= ?');
+    bindings.push(filters.from, filters.to);
+  } else if (filters.month) {
     const { start, end } = getMonthDateRange(filters.month);
     conditions.push('t.occurred_at >= ? AND t.occurred_at <= ?');
     bindings.push(start, end);
@@ -532,7 +885,7 @@ export async function listTransactions(
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 200;
+  const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 2500) : 300;
 
   const sql = `SELECT t.* FROM transactions t ${where} ORDER BY t.occurred_at DESC, t.created_at DESC LIMIT ?`;
   bindings.push(limit);
@@ -541,135 +894,70 @@ export async function listTransactions(
   return hydrateTransactionTags(db, res.results ?? []);
 }
 
-export async function getMonthSummary(db: D1Database, month: string): Promise<MonthSummary> {
-  const { start, end } = getMonthDateRange(month);
-  const [txRes, allThirdPartyRes, categories, tags, accounts] = await Promise.all([
-    db
-      .prepare('SELECT * FROM transactions WHERE occurred_at >= ? AND occurred_at <= ?')
-      .bind(start, end)
-      .all<RawTransactionRow>(),
-    db
-      .prepare("SELECT type, amount, third_party_name FROM transactions WHERE type IN ('third_party', 'third_party_repayment')")
-      .all<Pick<Transaction, 'type' | 'amount' | 'third_party_name'>>(),
-    listCategories(db),
-    listTags(db),
-    listAccountsWithBalances(db),
-  ]);
-
-  const txs = await hydrateTransactionTags(db, txRes.results ?? []);
-  let income = 0;
-  let expense = 0;
-  let investment = 0;
-  let usdExpense = 0;
-  const catTotals = new Map<string, number>();
-  const tagTotals = new Map<string, number>();
-
-  for (const tx of txs) {
-    if (tx.currency !== 'ARS') {
-      if (tx.type === 'expense' && tx.currency === 'USD') {
-        usdExpense += tx.amount;
-      }
-      continue;
-    }
-
-    if (tx.type === 'income') {
-      income += tx.amount;
-    } else if (tx.type === 'investment') {
-      investment += tx.amount;
-    } else if (tx.type === 'expense') {
-      expense += tx.amount;
-      const catId = tx.category_id ?? 'otros';
-      catTotals.set(catId, (catTotals.get(catId) ?? 0) + tx.amount);
-      for (const tagId of tx.tags) {
-        tagTotals.set(tagId, (tagTotals.get(tagId) ?? 0) + tx.amount);
-      }
-    }
+export async function getPeriodSummary(
+  db: D1Database,
+  options: {
+    from: string;
+    to: string;
+    basis?: AccountingBasis;
+    statementMonth?: string;
   }
+): Promise<MonthSummary> {
+  const { accounts, categories, tags, transactions } = await loadAllDataForAnalysis(db);
+  return computePeriodMetrics(accounts, transactions, categories, tags, {
+    from: options.from,
+    to: options.to,
+    basis: options.basis ?? 'cash',
+    statementMonth: options.statementMonth,
+  });
+}
 
-  const catMap = new Map(categories.map((c) => [c.id, c]));
-  const byCategory: CategoryBreakdown[] = Array.from(catTotals.entries())
-    .map(([categoryId, total]) => {
-      const cat = catMap.get(categoryId);
-      return {
-        category_id: categoryId,
-        name: cat?.name ?? 'Otros',
-        icon: cat?.icon ?? '📦',
-        color: cat?.color ?? '#71717a',
-        total: round2(total),
-        percentage: expense > 0 ? Math.round((total / expense) * 1000) / 10 : 0,
-      };
-    })
-    .sort((a, b) => b.total - a.total);
-
-  const tagMap = new Map(tags.map((t) => [t.id, t]));
-  const byTag: TagBreakdown[] = Array.from(tagTotals.entries())
-    .map(([tagId, total]) => {
-      const tag = tagMap.get(tagId);
-      return {
-        tag_id: tagId,
-        name: tag?.name ?? tagId,
-        color: tag?.color ?? '#71717a',
-        total: round2(total),
-        percentage: expense > 0 ? Math.round((total / expense) * 1000) / 10 : 0,
-      };
-    })
-    .sort((a, b) => b.total - a.total);
-
-  const thirdParty = computeThirdPartyBalances(allThirdPartyRes.results ?? []);
-
-  return {
-    month,
-    income: round2(income),
-    expense: round2(expense),
-    investment: round2(investment),
-    net: round2(income - expense),
-    net_after_investment: round2(income - expense - investment),
-    usd_expense: round2(usdExpense),
-    by_category: byCategory,
-    by_tag: byTag,
-    third_party_pending: thirdParty.total_pending,
-    third_party_by_person: thirdParty.by_person,
-    accounts,
-  };
+export async function getMonthSummary(
+  db: D1Database,
+  month: string,
+  basis: AccountingBasis = 'cash'
+): Promise<MonthSummary> {
+  const { start, end } = getMonthDateRange(month);
+  return getPeriodSummary(db, { from: start, to: end, basis, statementMonth: month });
 }
 
 export async function getMonthlyHistory(
   db: D1Database,
-  endMonth: string,
-  months = 6
+  options: { from: string; to: string; basis?: AccountingBasis }
 ): Promise<MonthlyHistoryPoint[]> {
-  const monthList = previousMonths(endMonth, months);
-  const start = `${monthList[0]}-01`;
-  const { end } = getMonthDateRange(endMonth);
+  const { accounts, categories, tags, transactions } = await loadAllDataForAnalysis(db);
+  const basis = options.basis ?? 'cash';
 
-  const res = await db
-    .prepare(
-      `SELECT substr(occurred_at, 1, 7) as month, type, SUM(amount) as total
-       FROM transactions
-       WHERE occurred_at >= ? AND occurred_at <= ?
-         AND currency = 'ARS'
-         AND type IN ('income', 'expense')
-       GROUP BY substr(occurred_at, 1, 7), type`
-    )
-    .bind(start, end)
-    .all<{ month: string; type: 'income' | 'expense'; total: number }>();
+  const fromYm = options.from.slice(0, 7);
+  const toYm = options.to.slice(0, 7);
+  const diff = monthDiff(fromYm, toYm);
 
-  const map = new Map<string, { income: number; expense: number }>();
-  for (const m of monthList) {
-    map.set(m, { income: 0, expense: 0 });
-  }
-  for (const row of res.results ?? []) {
-    const entry = map.get(row.month);
-    if (entry) {
-      entry[row.type] = round2(row.total);
+  let months: string[];
+  if (diff <= 0) {
+    months = previousMonths(toYm, 6);
+  } else {
+    const count = Math.min(diff + 1, 24);
+    const startYm = addMonths(toYm, -(count - 1));
+    months = [];
+    for (let i = 0; i < count; i++) {
+      months.push(addMonths(startYm, i));
     }
   }
 
-  return monthList.map((m) => ({
-    month: m,
-    income: map.get(m)?.income ?? 0,
-    expense: map.get(m)?.expense ?? 0,
-  }));
+  return months.map((m) => {
+    const { start, end } = getMonthDateRange(m);
+    const summary = computePeriodMetrics(accounts, transactions, categories, tags, {
+      from: start,
+      to: end,
+      basis,
+      statementMonth: m,
+    });
+    return {
+      month: m,
+      income: summary.income,
+      expense: summary.expense,
+    };
+  });
 }
 
 export async function listRecurringItems(db: D1Database): Promise<RecurringItem[]> {

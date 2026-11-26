@@ -3,6 +3,7 @@ web/node_modules/
 web/dist/
 .wrangler/
 .dev.vars
+.agent/
 imports/
 *.tsbuildinfo
 *.log

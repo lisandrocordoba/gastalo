@@ -243,10 +243,12 @@ REGLAS CLAVE DEL FLUJO DEL USUARIO:
 4. "tc mp" / "tarjeta mercado pago" / "tarjeta mp" -> "mp_credito".
 5. Reservas: "pasé a reservas" -> type: "transfer", "mp" -> "mp_reservas". "saqué de reservas" -> "mp_reservas" -> "mp".
 6. Pago de resumen tarjeta: "pagué la tarjeta" / "pagué BBVA" -> type: "transfer", "mp" -> "bbva_credito" (o "mp_credito" si aclara MP).
-7. Categorías de comida (separación estricta):
+7. Categorías clave (separación estricta):
    - "supermercado": compras de casa (super, chino, carnicería, verdulería, huevos).
    - "comida_afuera": almuerzos, delivery, pizza, empanadas, hamburguesas, restaurantes.
    - "kiosco_cafe": alfajores, gaseosas, agua, café, facturas, helado.
+   - "servicios": gastos fijos de la casa (luz, agua, gas, internet/wifi, expensas).
+   - "suscripciones": apps/servicios personales (YouTube, Spotify, Google AI, Nivel 6, GamePass, Tuenti).
    - "deporte": alquiler de cancha, partido, gimnasio.
 8. Etiquetas (tags):
    - Agregá "casa" si menciona casa/hogar/carnicería/verdulería familiar.
