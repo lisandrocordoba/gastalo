@@ -102,17 +102,24 @@ export function CreditCardsSection({
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const catMap = new Map(categories.map((c) => [c.id, c]));
   const liquidAccounts = accounts.filter((a) => a.type !== 'credit_card');
+  const matchingLiquidAccounts = payingStatement
+    ? liquidAccounts.filter((a) => a.currency === payingStatement.currency)
+    : [];
   const hasSelectedCard = statements.some((s) => s.account_id === selectedAccount);
 
   const openPayModal = (st: CardStatement) => {
+    const matching = liquidAccounts.filter((a) => a.currency === st.currency);
     const preferredFrom =
-      liquidAccounts.find((a) => a.currency === st.currency && a.is_default === 1) ??
-      liquidAccounts.find((a) => a.currency === st.currency) ??
-      liquidAccounts.find((a) => a.is_default === 1) ??
-      liquidAccounts[0];
+      matching.find((a) => a.is_default === 1) ?? matching[0];
+    const initialAmount =
+      st.status === 'partial'
+        ? (st.remaining_due ?? Math.max(0, st.total_due - (st.paid_amount ?? 0)))
+        : st.total_due > 0
+          ? st.total_due
+          : Math.abs(st.card_debt);
     setPayingStatement(st);
     setFromAccountId(preferredFrom?.id ?? '');
-    setPayAmount(String(st.total_due > 0 ? st.total_due : Math.abs(st.card_debt)));
+    setPayAmount(String(initialAmount));
     setFeesAmount('0');
     setPayDate(defaultPayDate);
     setError('');
@@ -121,6 +128,12 @@ export function CreditCardsSection({
   const handlePaySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!payingStatement) return;
+    if (!fromAccountId || !matchingLiquidAccounts.some((a) => a.id === fromAccountId)) {
+      setError(
+        `Creá al menos una cuenta líquida en ${payingStatement.currency} para poder registrar el pago de este resumen.`
+      );
+      return;
+    }
     const amt = Number(payAmount);
     const fees = Number(feesAmount || 0);
     if (!Number.isFinite(amt) || amt < 0 || !Number.isFinite(fees) || fees < 0 || amt + fees <= 0) {
@@ -232,6 +245,9 @@ export function CreditCardsSection({
         {statements.map((st) => {
           const isExpanded = expandedCardId === st.account_id;
           const isPaid = st.status === 'paid';
+          const isPartial = st.status === 'partial';
+          const remaining =
+            st.remaining_due ?? Math.max(0, st.total_due - (st.paid_amount ?? 0));
           const isDueToday =
             !isPaid && !st.is_overdue && st.total_due > 0 && st.due_date === defaultPayDate;
           const isSelected = selectedAccount === st.account_id;
@@ -275,16 +291,23 @@ export function CreditCardsSection({
                       className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
                         isPaid
                           ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300'
-                          : st.is_overdue
-                            ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
-                            : isDueToday
-                              ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
-                              : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
+                          : isPartial
+                            ? 'border-amber-500/35 bg-amber-500/15 text-amber-300'
+                            : st.is_overdue
+                              ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                              : isDueToday
+                                ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
+                                : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
                       }`}
                     >
                       {isPaid ? (
                         <>
                           <CheckCircle2 className="h-3 w-3" /> Pagado
+                        </>
+                      ) : isPartial ? (
+                        <>
+                          <Clock className="h-3 w-3" /> Pago parcial · resta{' '}
+                          {formatMoney(remaining, st.currency)}
                         </>
                       ) : st.is_overdue ? (
                         <>
@@ -364,9 +387,15 @@ export function CreditCardsSection({
                   </p>
                 )}
 
-                {isPaid && st.paid_amount !== null && (
-                  <p className="mt-1 text-[11px] text-emerald-400 tabular-nums">
-                    Pagado el {st.paid_at}: {formatMoney(st.paid_amount, st.currency)}
+                {(isPaid || isPartial) && st.paid_amount !== null && (
+                  <p
+                    className={`mt-1 text-[11px] tabular-nums ${
+                      isPaid ? 'text-emerald-400' : 'text-amber-300'
+                    }`}
+                  >
+                    Pagado{st.paid_at ? ` el ${st.paid_at}` : ''}:{' '}
+                    {formatMoney(st.paid_amount, st.currency)}
+                    {isPartial ? ` · Resta: ${formatMoney(remaining, st.currency)}` : ''}
                   </p>
                 )}
               </div>
@@ -401,7 +430,7 @@ export function CreditCardsSection({
                       }}
                       className="rounded-xl bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-white"
                     >
-                      💳 Pagar resumen
+                      {isPartial ? '💳 Completar pago' : '💳 Pagar resumen'}
                     </button>
                   )}
                 </div>
@@ -548,9 +577,9 @@ export function CreditCardsSection({
             <form onSubmit={handlePaySubmit} className="mt-4 space-y-3">
               <div>
                 <label className="mb-1 block text-xs text-zinc-400">Cuenta que paga</label>
-                {liquidAccounts.length === 0 ? (
+                {matchingLiquidAccounts.length === 0 ? (
                   <p className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                    Creá al menos una cuenta líquida (billetera, banco o efectivo) para poder registrar el pago.
+                    Creá al menos una cuenta líquida en {payingStatement.currency} para poder registrar el pago de este resumen.
                   </p>
                 ) : (
                   <select
@@ -558,7 +587,7 @@ export function CreditCardsSection({
                     onChange={(e) => setFromAccountId(e.target.value)}
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                   >
-                    {liquidAccounts.map((a) => (
+                    {matchingLiquidAccounts.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.name} ({a.currency} · {formatMoney(a.balance, a.currency)})
                       </option>
@@ -625,7 +654,7 @@ export function CreditCardsSection({
                 </button>
                 <button
                   type="submit"
-                  disabled={saving || liquidAccounts.length === 0}
+                  disabled={saving || matchingLiquidAccounts.length === 0}
                   className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                 >
                   {saving ? 'Registrando...' : 'Confirmar pago'}

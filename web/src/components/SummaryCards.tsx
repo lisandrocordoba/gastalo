@@ -15,9 +15,26 @@ export function SummaryCards({
   cardPurchasesFilterActive,
   onToggleCardPurchasesFilter,
 }: Props) {
+  const usdExpense = summary.usd_expense ?? 0;
+  const brlExpense = summary.brl_expense ?? 0;
+  const foreignExpenseParts = [
+    usdExpense > 0 ? `+ ${formatMoney(usdExpense, 'USD')}` : null,
+    brlExpense > 0 ? `+ ${formatMoney(brlExpense, 'BRL')}` : null,
+  ].filter(Boolean);
+  const expenseSubtitle =
+    foreignExpenseParts.length > 0
+      ? foreignExpenseParts.join(' · ')
+      : 'Cuentas líquidas y pagos TC';
+
+  const cardPurchasesUsd = summary.card_purchases_usd ?? 0;
+  const cardPurchasesBrl = summary.card_purchases_brl ?? 0;
+  const foreignCardParts = [
+    cardPurchasesUsd > 0 ? `+ ${formatMoney(cardPurchasesUsd, 'USD')}` : null,
+    cardPurchasesBrl > 0 ? `+ ${formatMoney(cardPurchasesBrl, 'BRL')}` : null,
+  ].filter(Boolean);
   const cardPurchasesSubtitle =
-    summary.card_purchases_usd > 0
-      ? `+ ${formatMoney(summary.card_purchases_usd, 'USD')} · No resta liquidez`
+    foreignCardParts.length > 0
+      ? `${foreignCardParts.join(' · ')} · No resta liquidez`
       : 'Financiado · no resta liquidez';
 
   return (
@@ -55,9 +72,7 @@ export function SummaryCards({
             {formatMoney(summary.expense)}
           </p>
           <p className="mt-0.5 text-[11px] text-zinc-400 tabular-nums">
-            {summary.usd_expense > 0
-              ? `+ ${formatMoney(summary.usd_expense, 'USD')}`
-              : 'Cuentas líquidas y pagos TC'}
+            {expenseSubtitle}
           </p>
         </div>
 

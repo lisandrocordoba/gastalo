@@ -4,6 +4,7 @@ import {
   computeAccountBalances,
   computeCardStatements,
   computeFutureProjection,
+  computeMonthlyHistory,
   computeOverdueCardAlerts,
   computePeriodMetrics,
   computeSavingsBalance,
@@ -20,7 +21,11 @@ import {
   defaultColorForAccountType,
   formatCurrency,
   getMonthDateRange,
+  isSupportedCurrency,
+  isValidIsoDate,
+  isValidYearMonth,
   monthDiff,
+  normalizeCurrency,
   previousMonths,
   shortId,
   slugifyId,
@@ -38,10 +43,41 @@ describe('utils', () => {
     expect(arrayBufferToBase64(bytes.buffer)).toBe('SG9sYQ==');
   });
 
-  it('formatCurrency formats ARS and USD', () => {
+  it('formatCurrency formats ARS, USD, BRL and normalizes -0 / non-finite values', () => {
     expect(formatCurrency(12500, 'ARS')).toBe('$ 12.500');
     expect(formatCurrency(-3500.5, 'ARS')).toBe('-$ 3.500,50');
     expect(formatCurrency(50, 'USD')).toBe('US$ 50');
+    expect(formatCurrency(120.75, 'BRL')).toBe('R$ 120,75');
+    expect(formatCurrency(-0.001, 'ARS')).toBe('$ 0');
+    expect(formatCurrency(-0.004, 'USD')).toBe('US$ 0');
+    expect(formatCurrency(-0, 'BRL')).toBe('R$ 0');
+    expect(formatCurrency(Number.NaN, 'ARS')).toBe('$ 0');
+    expect(formatCurrency(Number.POSITIVE_INFINITY, 'USD')).toBe('US$ 0');
+  });
+
+  it('validates ISO dates, year-months, and supported currencies strictly', () => {
+    expect(isValidIsoDate('2026-11-26')).toBe(true);
+    expect(isValidIsoDate('2024-02-29')).toBe(true);
+    expect(isValidIsoDate('2025-02-29')).toBe(false);
+    expect(isValidIsoDate('2026-02-31')).toBe(false);
+    expect(isValidIsoDate('2026-13-01')).toBe(false);
+    expect(isValidIsoDate('2026-00-10')).toBe(false);
+
+    expect(isValidYearMonth('2026-01')).toBe(true);
+    expect(isValidYearMonth('2026-12')).toBe(true);
+    expect(isValidYearMonth('2026-13')).toBe(false);
+    expect(isValidYearMonth('2026-00')).toBe(false);
+    expect(isValidYearMonth('26-11')).toBe(false);
+
+    expect(isSupportedCurrency('ARS')).toBe(true);
+    expect(isSupportedCurrency('USD')).toBe(true);
+    expect(isSupportedCurrency('BRL')).toBe(true);
+    expect(isSupportedCurrency('EUR')).toBe(false);
+
+    expect(normalizeCurrency(' brl ')).toBe('BRL');
+    expect(normalizeCurrency('EUR')).toBeNull();
+    expect(normalizeCurrency('EUR', 'ARS')).toBeNull();
+    expect(normalizeCurrency(undefined, 'ARS')).toBe('ARS');
   });
 
   it('getMonthDateRange, addMonths, monthDiff and previousMonths handle month boundaries', () => {
@@ -1130,5 +1166,505 @@ describe('D1 query helpers (listTransactions and getTransactionsByIds)', () => {
     expect(txQueries).toHaveLength(2);
     expect(txQueries[0].args).toHaveLength(80);
     expect(txQueries[1].args).toHaveLength(5);
+  });
+});
+
+describe('Lote 2: partial/multiple payments, BRL/USD accounting, recurring matching, and monthly history', () => {
+  const accounts: Account[] = [
+    { id: 'wallet_ars', name: 'Billetera ARS', type: 'wallet', currency: 'ARS', initial_balance: 500000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
+    { id: 'wallet_usd', name: 'Caja USD', type: 'wallet', currency: 'USD', initial_balance: 1000, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01' },
+    { id: 'wallet_brl', name: 'Conta BRL', type: 'wallet', currency: 'BRL', initial_balance: 2000, color: '#22C55E', is_default: 0, created_at: '2026-01-01' },
+    { id: 'card_ars', name: 'Visa ARS', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, due_day: 10, created_at: '2026-01-01' },
+    { id: 'card_usd', name: 'Visa USD', type: 'credit_card', currency: 'USD', initial_balance: 0, color: '#18181B', is_default: 0, due_day: 10, created_at: '2026-01-01' },
+    { id: 'card_brl', name: 'Visa BRL', type: 'credit_card', currency: 'BRL', initial_balance: 0, color: '#18181B', is_default: 0, due_day: 10, created_at: '2026-01-01' },
+  ];
+  const categories: Category[] = [
+    { id: 'compras', name: 'Compras', icon: '🛍️', type: 'expense', color: '#29B6F6' },
+    { id: 'servicios', name: 'Servicios', icon: '💡', type: 'expense', color: '#FB8C00' },
+    { id: 'otros', name: 'Otros / Trámites', icon: '📦', type: 'expense', color: '#9E9E9E' },
+  ];
+  const tags: Tag[] = [{ id: 'viaje', name: 'viaje', color: '#29B6F6' }];
+
+  const makeTx = (
+    partial: Partial<Transaction> & Pick<Transaction, 'id' | 'type' | 'amount' | 'account_id' | 'description' | 'occurred_at'>
+  ): Transaction => ({
+    currency: 'ARS',
+    to_account_id: null,
+    category_id: null,
+    source: 'test',
+    raw_input: null,
+    telegram_message_id: null,
+    installments_total: null,
+    first_installment_month: null,
+    statement_month: null,
+    budget_month: null,
+    third_party_name: null,
+    linked_group_id: null,
+    tags: [],
+    created_at: '2026-01-01T00:00:00Z',
+    ...partial,
+  });
+
+  it('guards account balances against cross-currency transactions', () => {
+    const mismatched = [
+      makeTx({
+        id: 'bad_tx',
+        type: 'expense',
+        amount: 500,
+        currency: 'USD',
+        account_id: 'wallet_ars',
+        description: 'Mismatched currency',
+        occurred_at: '2026-05-01',
+      }),
+    ];
+    const balances = Object.fromEntries(computeAccountBalances(accounts, mismatched).map((a) => [a.id, a.balance]));
+    expect(balances.wallet_ars).toBe(500000);
+  });
+
+  it('handles partial and multiple payments for the same statement_month without double-subtracting third_party_total', () => {
+    const baseTxs: Transaction[] = [
+      makeTx({
+        id: 'c_own_1',
+        type: 'expense',
+        amount: 60000,
+        account_id: 'card_ars',
+        category_id: 'compras',
+        description: 'Zapatillas',
+        occurred_at: '2026-04-10',
+        statement_month: '2026-05',
+        tags: ['viaje'],
+      }),
+      makeTx({
+        id: 'c_own_2',
+        type: 'expense',
+        amount: 40000,
+        account_id: 'card_ars',
+        category_id: 'servicios',
+        description: 'Internet',
+        occurred_at: '2026-04-12',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'c_third',
+        type: 'third_party',
+        amount: 20000,
+        account_id: 'card_ars',
+        description: 'Compra tercero',
+        occurred_at: '2026-04-15',
+        statement_month: '2026-05',
+        third_party_name: 'Ana',
+      }),
+    ];
+
+    // Partial payment #1 on 2026-05-08: 50000 (absorbs 20000 third-party + 30000 own)
+    const afterPartial = [
+      ...baseTxs,
+      makeTx({
+        id: 'pay_1',
+        type: 'transfer',
+        amount: 50000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Pago parcial 1',
+        occurred_at: '2026-05-08',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    // After due_date (2026-05-10), partial payment still keeps status 'partial' and is_overdue true
+    const partialStmt = computeCardStatements(accounts, afterPartial, '2026-05', [], '2026-05-12').find(
+      (s) => s.account_id === 'card_ars'
+    )!;
+    expect(partialStmt.status).toBe('partial');
+    expect(partialStmt.is_overdue).toBe(true);
+    expect(partialStmt.paid_amount).toBe(50000);
+    expect(partialStmt.remaining_due).toBe(70000);
+    expect(partialStmt.paid_transaction_ids).toEqual(['pay_1']);
+
+    // Partial payment #2 in SAME month (2026-05-15): 70000 (thirdRemaining is already 0, so full 70000 counts as own)
+    const sameMonthFull = [
+      ...afterPartial,
+      makeTx({
+        id: 'pay_2',
+        type: 'transfer',
+        amount: 70000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Pago parcial 2',
+        occurred_at: '2026-05-15',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    const paidStmt = computeCardStatements(accounts, sameMonthFull, '2026-05', [], '2026-05-16').find(
+      (s) => s.account_id === 'card_ars'
+    )!;
+    expect(paidStmt.status).toBe('paid');
+    expect(paidStmt.is_overdue).toBe(false);
+    expect(paidStmt.paid_amount).toBe(120000);
+    expect(paidStmt.remaining_due).toBe(0);
+    expect(paidStmt.paid_transaction_ids).toEqual(['pay_1', 'pay_2']);
+
+    const maySameMonth = computePeriodMetrics(accounts, sameMonthFull, categories, tags, {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+    // Must be exactly 100000 (not 120000 - 20000 twice = 80000!)
+    expect(maySameMonth.expense).toBe(100000);
+    expect(maySameMonth.by_category.map((c) => [c.category_id, c.total])).toEqual([
+      ['compras', 60000],
+      ['servicios', 40000],
+    ]);
+    expect(maySameMonth.by_tag.map((t) => [t.tag_id, t.total])).toEqual([['viaje', 60000]]);
+
+    // Now test split across two different months: pay_1 in April (2026-04-28), pay_2 in May (2026-05-15)
+    const splitMonthTxs = [
+      ...baseTxs,
+      makeTx({
+        id: 'pay_apr',
+        type: 'transfer',
+        amount: 50000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Adelanto abril',
+        occurred_at: '2026-04-28',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'pay_may',
+        type: 'transfer',
+        amount: 70000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Saldo mayo',
+        occurred_at: '2026-05-15',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    const aprSummary = computePeriodMetrics(accounts, splitMonthTxs, categories, tags, {
+      from: '2026-04-01',
+      to: '2026-04-30',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+    const maySummary = computePeriodMetrics(accounts, splitMonthTxs, categories, tags, {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+    expect(aprSummary.expense).toBe(30000);
+    expect(maySummary.expense).toBe(70000);
+    expect(aprSummary.expense + maySummary.expense).toBe(100000);
+  });
+
+  it('tracks BRL and USD metrics, card purchases, projections, and card statement payments excluding third-party share', () => {
+    const txs: Transaction[] = [
+      makeTx({
+        id: 'brl_cash',
+        type: 'expense',
+        amount: 150,
+        currency: 'BRL',
+        account_id: 'wallet_brl',
+        description: 'Almuerzo Florianópolis',
+        occurred_at: '2026-05-02',
+      }),
+      makeTx({
+        id: 'brl_card_own',
+        type: 'expense',
+        amount: 200,
+        currency: 'BRL',
+        account_id: 'card_brl',
+        description: 'Hotel BRL',
+        occurred_at: '2026-04-20',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'brl_card_third',
+        type: 'third_party',
+        amount: 100,
+        currency: 'BRL',
+        account_id: 'card_brl',
+        description: 'Hotel amigo',
+        occurred_at: '2026-04-20',
+        statement_month: '2026-05',
+        third_party_name: 'Juan',
+      }),
+      makeTx({
+        id: 'brl_pay',
+        type: 'transfer',
+        amount: 300,
+        currency: 'BRL',
+        account_id: 'wallet_brl',
+        to_account_id: 'card_brl',
+        description: 'Pago resumen BRL',
+        occurred_at: '2026-05-05',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'brl_card_swipe_may',
+        type: 'expense',
+        amount: 80,
+        currency: 'BRL',
+        account_id: 'card_brl',
+        description: 'Uber BRL',
+        occurred_at: '2026-05-10',
+        statement_month: '2026-06',
+      }),
+      makeTx({
+        id: 'usd_card_own',
+        type: 'expense',
+        amount: 40,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'Hosting USD',
+        occurred_at: '2026-04-15',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'usd_card_third',
+        type: 'third_party',
+        amount: 20,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'Dominio amigo',
+        occurred_at: '2026-04-15',
+        statement_month: '2026-05',
+        third_party_name: 'Juan',
+      }),
+      makeTx({
+        id: 'usd_pay',
+        type: 'transfer',
+        amount: 60,
+        currency: 'USD',
+        account_id: 'wallet_usd',
+        to_account_id: 'card_usd',
+        description: 'Pago resumen USD',
+        occurred_at: '2026-05-06',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    const mayCash = computePeriodMetrics(accounts, txs, categories, tags, {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      basis: 'cash',
+      statementMonth: '2026-05',
+    });
+
+    expect(mayCash.brl_expense).toBe(350); // 150 direct BRL + 200 own BRL from card payment
+    expect(mayCash.card_purchases_brl).toBe(80);
+    expect(mayCash.usd_expense).toBe(40); // 40 own USD from card payment (excludes 20 third-party)
+
+    const recurring: RecurringItem[] = [
+      {
+        id: 'rec_brl',
+        name: 'Seguro BRL',
+        type: 'expense',
+        amount: 75.5,
+        currency: 'BRL',
+        account_id: 'wallet_brl',
+        category_id: 'servicios',
+        day_of_month: 5,
+        start_month: '2026-06',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+    ];
+    const proj = computeFutureProjection(txs, recurring, 0, '2026-06', 2);
+    expect(proj.months[0].recurring_brl_total_amount).toBe(75.5);
+    expect(proj.months[1].recurring_brl_total_amount).toBe(75.5);
+  });
+
+  it('matches computeMonthlyHistory income and expense identically to computePeriodMetrics', () => {
+    const txs: Transaction[] = [
+      makeTx({
+        id: 'inc_1',
+        type: 'income',
+        amount: 900000,
+        account_id: 'wallet_ars',
+        description: 'Sueldo',
+        occurred_at: '2026-03-30',
+        budget_month: '2026-04',
+      }),
+      makeTx({
+        id: 'exp_1',
+        type: 'expense',
+        amount: 45000,
+        account_id: 'wallet_ars',
+        category_id: 'compras',
+        description: 'Super',
+        occurred_at: '2026-04-05',
+      }),
+      makeTx({
+        id: 'card_1',
+        type: 'expense',
+        amount: 30000,
+        account_id: 'card_ars',
+        category_id: 'servicios',
+        description: 'Luz',
+        occurred_at: '2026-04-12',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'card_third',
+        type: 'third_party',
+        amount: 10000,
+        account_id: 'card_ars',
+        description: 'Luz vecino',
+        occurred_at: '2026-04-12',
+        statement_month: '2026-05',
+        third_party_name: 'Vecino',
+      }),
+      makeTx({
+        id: 'pay_part_apr',
+        type: 'transfer',
+        amount: 15000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Adelanto',
+        occurred_at: '2026-04-29',
+        statement_month: '2026-05',
+      }),
+      makeTx({
+        id: 'pay_rest_may',
+        type: 'transfer',
+        amount: 25000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Saldo',
+        occurred_at: '2026-05-09',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    for (const basis of ['cash', 'accrual'] as const) {
+      const history = computeMonthlyHistory(accounts, txs, {
+        from: '2026-03-01',
+        to: '2026-05-31',
+        basis,
+      });
+      expect(history.map((h) => h.month)).toEqual(['2026-03', '2026-04', '2026-05']);
+
+      for (const point of history) {
+        const { start, end } = getMonthDateRange(point.month);
+        const summary = computePeriodMetrics(accounts, txs, categories, tags, {
+          from: start,
+          to: end,
+          basis,
+          statementMonth: point.month,
+        });
+        expect(point.income).toBe(summary.income);
+        expect(point.expense).toBe(summary.expense);
+      }
+    }
+  });
+
+  it('improves cardRecurring matching: accent-insensitive, word-boundary, currency-matched, and excludes installments', () => {
+    const recurring: RecurringItem[] = [
+      {
+        id: 'rec_ai',
+        name: 'AI',
+        type: 'expense',
+        amount: 20,
+        currency: 'USD',
+        account_id: 'card_usd',
+        category_id: 'servicios',
+        day_of_month: 5,
+        start_month: '2026-05',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+      {
+        id: 'rec_cafe',
+        name: 'Café',
+        type: 'expense',
+        amount: 8000,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        category_id: 'compras',
+        day_of_month: 8,
+        start_month: '2026-05',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+      {
+        id: 'rec_tv',
+        name: 'TV',
+        type: 'expense',
+        amount: 10000,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        category_id: 'servicios',
+        day_of_month: 12,
+        start_month: '2026-05',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+    ];
+
+    const txs: Transaction[] = [
+      // "Mail" contains "ai" as a substring — must NOT match "AI"
+      makeTx({
+        id: 'tx_mail',
+        type: 'expense',
+        amount: 5,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'Proton Mail',
+        occurred_at: '2026-04-10',
+      }),
+      // Accent-insensitive match: "Cafe Martinez" matches "Café"
+      makeTx({
+        id: 'tx_cafe',
+        type: 'expense',
+        amount: 8000,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        description: 'Cafe Martinez',
+        occurred_at: '2026-04-12',
+      }),
+      // Installment purchase must NOT match recurring item "TV"
+      makeTx({
+        id: 'tx_tv_installment',
+        type: 'expense',
+        amount: 300000,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        description: 'Smart TV Samsung',
+        occurred_at: '2026-04-15',
+        installments_total: 6,
+        first_installment_month: '2026-05',
+      }),
+    ];
+
+    const stmts = computeCardStatements(accounts, txs, '2026-05', recurring, '2026-05-05');
+    const usdStmt = stmts.find((s) => s.account_id === 'card_usd')!;
+    const arsStmt = stmts.find((s) => s.account_id === 'card_ars')!;
+
+    expect(usdStmt.recurring_items.find((r) => r.recurring_id === 'rec_ai')?.posted_transaction_id).toBeNull();
+    expect(arsStmt.recurring_items.find((r) => r.recurring_id === 'rec_cafe')?.posted_transaction_id).toBe('tx_cafe');
+    expect(arsStmt.recurring_items.find((r) => r.recurring_id === 'rec_tv')?.posted_transaction_id).toBeNull();
+
+    // Now add an actual word-boundary match for "AI" in USD ("Google AI Pro")
+    const withAi = [
+      ...txs,
+      makeTx({
+        id: 'tx_ai_real',
+        type: 'expense',
+        amount: 20,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'Google AI Pro',
+        occurred_at: '2026-05-03',
+        statement_month: '2026-05',
+      }),
+    ];
+    const stmts2 = computeCardStatements(accounts, withAi, '2026-05', recurring, '2026-05-05');
+    const usdStmt2 = stmts2.find((s) => s.account_id === 'card_usd')!;
+    expect(usdStmt2.recurring_items.find((r) => r.recurring_id === 'rec_ai')?.posted_transaction_id).toBe('tx_ai_real');
   });
 });

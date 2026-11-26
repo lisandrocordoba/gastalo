@@ -101,6 +101,9 @@ export function FutureProjectionCard({
               {m.recurring_usd_total_amount > 0
                 ? ` · USD: ${formatMoney(m.recurring_usd_total_amount, 'USD')}`
                 : ''}
+              {(m.recurring_brl_total_amount ?? 0) > 0
+                ? ` · BRL: ${formatMoney(m.recurring_brl_total_amount ?? 0, 'BRL')}`
+                : ''}
             </p>
           </div>
         ))}
