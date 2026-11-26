@@ -14,6 +14,7 @@ interface Props {
     initial_balance: number;
     color: string;
     is_default: number;
+    due_day: number | null;
   }) => Promise<void>;
   onUpdate: (
     id: string,
@@ -24,6 +25,7 @@ interface Props {
       initial_balance: number;
       color: string;
       is_default: number;
+      due_day: number | null;
     }
   ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -78,6 +80,7 @@ export function AccountModal({
   const [color, setColor] = useState(() => defaultColorForType(defaultType));
   const [colorTouched, setColorTouched] = useState(false);
   const [isDefault, setIsDefault] = useState(false);
+  const [dueDay, setDueDay] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -92,6 +95,7 @@ export function AccountModal({
       setColor(editing.color || defaultColorForType(editing.type));
       setColorTouched(true);
       setIsDefault(editing.is_default === 1);
+      setDueDay(editing.due_day ? String(editing.due_day) : '');
     } else {
       setName('');
       setType(defaultType);
@@ -100,6 +104,7 @@ export function AccountModal({
       setColor(defaultColorForType(defaultType));
       setColorTouched(false);
       setIsDefault(false);
+      setDueDay('');
     }
   }, [open, editing, defaultType]);
 
@@ -128,6 +133,16 @@ export function AccountModal({
       return;
     }
 
+    let parsedDueDay: number | null = null;
+    if (type === 'credit_card' && dueDay.trim() !== '') {
+      const dayNum = Number(dueDay);
+      if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 31) {
+        setError('El día de vencimiento debe ser un entero entre 1 y 31.');
+        return;
+      }
+      parsedDueDay = dayNum;
+    }
+
     setSaving(true);
     setError('');
     try {
@@ -138,6 +153,7 @@ export function AccountModal({
         initial_balance: numInitial,
         color,
         is_default: type === 'credit_card' ? 0 : isDefault ? 1 : 0,
+        due_day: type === 'credit_card' ? parsedDueDay : null,
       };
       if (editing) {
         await onUpdate(editing.id, payload);
@@ -246,6 +262,26 @@ export function AccountModal({
               </p>
             )}
           </div>
+
+          {type === 'credit_card' && (
+            <div>
+              <label className="mb-1 block text-xs text-zinc-400">
+                Día de vencimiento del resumen (1-31, opc.)
+              </label>
+              <input
+                type="number"
+                min="1"
+                max="31"
+                value={dueDay}
+                onChange={(e) => setDueDay(e.target.value)}
+                placeholder="Ej: 10"
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+              />
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Si pasa este día con resumen pendiente, la tarjeta te avisa como vencida.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="mb-1.5 block text-xs text-zinc-400">Color</label>

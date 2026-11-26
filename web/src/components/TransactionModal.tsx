@@ -55,6 +55,7 @@ export function TransactionModal({
   const [newTagInput, setNewTagInput] = useState('');
   const [installments, setInstallments] = useState('');
   const [firstInstallmentMonth, setFirstInstallmentMonth] = useState('');
+  const [budgetMonth, setBudgetMonth] = useState('');
   const [thirdPartyName, setThirdPartyName] = useState('');
   const [isShared, setIsShared] = useState(false);
   const [sharedAmount, setSharedAmount] = useState('');
@@ -91,6 +92,7 @@ export function TransactionModal({
       setSelectedTags(editing.tags ?? []);
       setInstallments(editing.installments_total ? String(editing.installments_total) : '');
       setFirstInstallmentMonth(editing.first_installment_month ?? '');
+      setBudgetMonth(editing.budget_month ?? '');
       setThirdPartyName(editing.third_party_name ?? '');
       setIsShared(false);
       setSharedAmount('');
@@ -106,6 +108,7 @@ export function TransactionModal({
       setSelectedTags([]);
       setInstallments('');
       setFirstInstallmentMonth(nextMonthFromDate(defaultDate));
+      setBudgetMonth('');
       setThirdPartyName('');
       setIsShared(false);
       setSharedAmount('');
@@ -219,6 +222,8 @@ export function TransactionModal({
           isCreditCard && parsedInst
             ? firstInstallmentMonth || nextMonthFromDate(occurredAt)
             : null,
+        budget_month:
+          (type === 'income' || type === 'expense') && budgetMonth ? budgetMonth : null,
         third_party_name: showThirdPartyField ? thirdPartyName.trim() || null : null,
       });
       onClose();
@@ -390,15 +395,38 @@ export function TransactionModal({
           </div>
 
           {(type === 'transfer' || showCategory) && (
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Fecha</label>
-              <input
-                type="date"
-                required
-                value={occurredAt}
-                onChange={(e) => setOccurredAt(e.target.value)}
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
-              />
+            <div className={showCategory ? 'grid grid-cols-2 gap-2' : undefined}>
+              <div>
+                <label className="mb-1 block text-xs text-zinc-400">Fecha</label>
+                <input
+                  type="date"
+                  required
+                  value={occurredAt}
+                  onChange={(e) => setOccurredAt(e.target.value)}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                />
+              </div>
+              {showCategory && (
+                <div>
+                  <div className="mb-1 flex items-center justify-between gap-1">
+                    <label className="text-xs text-zinc-400">Mes contable (opc.)</label>
+                    <button
+                      type="button"
+                      onClick={() => setBudgetMonth(nextMonthFromDate(occurredAt))}
+                      className="text-[10px] font-medium text-emerald-400 hover:underline"
+                    >
+                      Mes sig.
+                    </button>
+                  </div>
+                  <input
+                    type="month"
+                    value={budgetMonth}
+                    onChange={(e) => setBudgetMonth(e.target.value)}
+                    title="Opcional: asigná este movimiento al presupuesto de otro mes (ej. sueldo cobrado a fin de mes)"
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  />
+                </div>
+              )}
             </div>
           )}
 

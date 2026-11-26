@@ -4,6 +4,7 @@ import {
   computeAccountBalances,
   computeCardStatements,
   computeFutureProjection,
+  computeOverdueCardAlerts,
   computePeriodMetrics,
   computeSavingsBalance,
   computeThirdPartyBalances,
@@ -194,6 +195,7 @@ describe('future projection (installments + recurring vs savings)', () => {
         account_id: 'wallet_main',
         category_id: 'suscripciones',
         day_of_month: 5,
+        start_month: null,
         active: 1,
         created_at: '2026-01-01',
       },
@@ -206,8 +208,35 @@ describe('future projection (installments + recurring vs savings)', () => {
         account_id: 'wallet_main',
         category_id: 'otros',
         day_of_month: 10,
+        start_month: null,
         active: 0,
         created_at: '2026-01-01',
+      },
+      {
+        id: 'r_future_ars',
+        name: 'Seguro hogar',
+        type: 'expense',
+        amount: 10000,
+        currency: 'ARS',
+        account_id: 'wallet_main',
+        category_id: 'servicios',
+        day_of_month: 15,
+        start_month: '2027-01',
+        active: 1,
+        created_at: '2026-12-01',
+      },
+      {
+        id: 'r_usd',
+        name: 'Suscripción USD',
+        type: 'expense',
+        amount: 5,
+        currency: 'USD',
+        account_id: 'card_ars',
+        category_id: 'suscripciones',
+        day_of_month: null,
+        start_month: '2026-12',
+        active: 1,
+        created_at: '2026-12-01',
       },
     ];
 
@@ -215,10 +244,14 @@ describe('future projection (installments + recurring vs savings)', () => {
     expect(proj.months.map((m) => m.month)).toEqual(['2026-12', '2027-01', '2027-02']);
     expect(proj.months[0].installments_total_amount).toBe(44666.66);
     expect(proj.months[0].recurring_total_amount).toBe(12000);
+    expect(proj.months[0].recurring_usd_total_amount).toBe(5);
     expect(proj.months[0].total_committed).toBe(56666.66);
     expect(proj.next_month_coverage_delta).toBe(3333.34);
+    expect(proj.months[1].recurring_total_amount).toBe(22000);
     expect(proj.months[2].installments_total_amount).toBe(14666.66);
-    expect(proj.months[2].total_committed).toBe(26666.66);
+    expect(proj.months[2].recurring_total_amount).toBe(22000);
+    expect(proj.months[2].recurring_usd_total_amount).toBe(5);
+    expect(proj.months[2].total_committed).toBe(36666.66);
   });
 });
 
@@ -232,7 +265,7 @@ describe('agnostic gemini intent sanitization', () => {
   ];
   const categories = [
     { id: 'supermercado', type: 'expense' as const },
-    { id: 'kiosco_cafe', type: 'expense' as const },
+    { id: 'kiosco', type: 'expense' as const },
     { id: 'regalos', type: 'expense' as const },
     { id: 'otros', type: 'expense' as const },
     { id: 'otros_ingresos', type: 'income' as const },
@@ -303,7 +336,7 @@ describe('agnostic gemini intent sanitization', () => {
             amount: 1000,
             currency: 'ARS',
             account_id: 'cuenta_inexistente',
-            category_id: 'kiosco_cafe',
+            category_id: 'kiosco',
             description: 'Alfajor',
             occurred_at: '2026-11-25',
             tags: [],
@@ -331,6 +364,42 @@ describe('agnostic gemini intent sanitization', () => {
 
     expect(out.transactions[1].account_id).toBe('galicia');
     expect(out.transactions[2].to_account_id).toBe('ahorro');
+    expect(out.transactions[2].statement_month).toBeNull();
+  });
+
+  it('populates statement_month automatically on card statement payment transfers via Telegram', () => {
+    const out = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'transfer',
+            amount: 120000,
+            currency: 'ARS',
+            account_id: 'galicia',
+            to_account_id: 'visa_ars',
+            description: 'Pago resumen Visa',
+            occurred_at: '2026-11-10',
+            tags: [],
+          },
+          {
+            type: 'transfer',
+            amount: 95000,
+            currency: 'ARS',
+            account_id: 'galicia',
+            to_account_id: 'visa_ars',
+            description: 'Pago resumen octubre',
+            occurred_at: '2026-11-02',
+            statement_month: '2026-10',
+            tags: [],
+          },
+        ],
+      },
+      { accounts, categories, today: '2026-11-25' }
+    );
+
+    expect(out.transactions[0].statement_month).toBe('2026-11');
+    expect(out.transactions[1].statement_month).toBe('2026-10');
   });
 
   it('returns empty transactions when accounts list is empty and sanitizes manage operations', () => {
@@ -364,6 +433,16 @@ describe('agnostic gemini intent sanitization', () => {
             currency: 'usd',
             initial_balance: 0,
             is_default: true, // credit cards can never be default
+            due_day: 10,
+          },
+          {
+            action: 'create_account',
+            name: 'Caja Ahorro',
+            account_type: 'wallet',
+            currency: 'ars',
+            initial_balance: 0,
+            is_default: false,
+            due_day: 15, // ignored for non-card accounts
           },
           {
             action: 'create_category',
@@ -391,6 +470,16 @@ describe('agnostic gemini intent sanitization', () => {
         currency: 'USD',
         initial_balance: 0,
         is_default: false,
+        due_day: 10,
+      },
+      {
+        action: 'create_account',
+        name: 'Caja Ahorro',
+        account_type: 'wallet',
+        currency: 'ARS',
+        initial_balance: 0,
+        is_default: false,
+        due_day: null,
       },
       {
         action: 'create_category',
@@ -487,6 +576,7 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
     installments_total: null,
     first_installment_month: null,
     statement_month: null,
+    budget_month: null,
     third_party_name: null,
     linked_group_id: null,
     tags: [],
@@ -604,5 +694,209 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
     ]);
     expect(mayAfterPay.by_tag.map((t) => [t.tag_id, t.total])).toEqual([['familia', 11000]]);
     expect(mayAfterPay.card_statements[0].status).toBe('paid');
+  });
+
+  it('allocates income with budget_month to the target accounting period without changing real balances', () => {
+    const octSalary = makeTx({
+      id: 'sal_oct',
+      type: 'income',
+      amount: 950000,
+      account_id: 'wallet_main',
+      category_id: 'sueldo',
+      description: 'Sueldo',
+      occurred_at: '2026-10-29',
+      budget_month: '2026-11',
+    });
+
+    const oct = computePeriodMetrics(accounts, [octSalary], categories, tags, {
+      from: '2026-10-01',
+      to: '2026-10-31',
+      basis: 'cash',
+    });
+    const nov = computePeriodMetrics(accounts, [octSalary], categories, tags, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+    });
+
+    expect(oct.income).toBe(0);
+    expect(nov.income).toBe(950000);
+    expect(oct.accounts.find((a) => a.id === 'wallet_main')?.balance).toBe(1950000);
+  });
+
+  it('attaches active credit card recurring items respecting start_month and avoiding cross-month double matching', () => {
+    const recurring: RecurringItem[] = [
+      {
+        id: 'rec_ai',
+        name: 'Google AI Pro',
+        type: 'expense',
+        amount: 24000,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        category_id: 'suscripciones',
+        day_of_month: 15,
+        start_month: '2026-10',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+      {
+        id: 'rec_club',
+        name: 'Cuota socio',
+        type: 'expense',
+        amount: 34800,
+        currency: 'ARS',
+        account_id: 'card_ars',
+        category_id: 'deporte',
+        day_of_month: 12,
+        start_month: '2026-11',
+        active: 1,
+        created_at: '2026-01-01',
+      },
+    ];
+
+    const txs = [
+      makeTx({
+        id: 'tx_ai_oct_swipe',
+        type: 'expense',
+        amount: 24000,
+        account_id: 'card_ars',
+        category_id: 'suscripciones',
+        description: 'Google AI Pro',
+        occurred_at: '2026-10-15',
+        // No statement_month -> default dueMonth is next month (2026-11)
+      }),
+      makeTx({
+        id: 'tx_club',
+        type: 'expense',
+        amount: 34800,
+        account_id: 'card_ars',
+        category_id: 'deporte',
+        description: 'Cuota socio',
+        occurred_at: '2026-11-12',
+        statement_month: '2026-11',
+      }),
+    ];
+
+    // Historical month before any start_month should show zero recurring items
+    const aug = computeCardStatements(accounts, txs, '2026-08', recurring)[0];
+    expect(aug.recurring_items).toHaveLength(0);
+
+    // October matches only rec_ai (start_month 2026-10), and tx_ai_oct_swipe (due 2026-11) must NOT match October
+    const oct = computeCardStatements(accounts, txs, '2026-10', recurring)[0];
+    expect(oct.recurring_items).toHaveLength(1);
+    expect(oct.recurring_items[0].recurring_id).toBe('rec_ai');
+    expect(oct.recurring_items[0].posted_transaction_id).toBeNull();
+
+    // November shows both and detects both posted transactions cleanly
+    const nov = computeCardStatements(accounts, txs, '2026-11', recurring)[0];
+    expect(nov.recurring_items).toHaveLength(2);
+    expect(nov.recurring_items.find((r) => r.recurring_id === 'rec_club')?.posted_transaction_id).toBe('tx_club');
+    expect(nov.recurring_items.find((r) => r.recurring_id === 'rec_ai')?.posted_transaction_id).toBe('tx_ai_oct_swipe');
+
+    // December shows both as unposted templates
+    const dec = computeCardStatements(accounts, txs, '2026-12', recurring)[0];
+    expect(dec.recurring_items).toHaveLength(2);
+    expect(dec.recurring_items.every((r) => r.posted_transaction_id === null)).toBe(true);
+  });
+
+  it('flags unpaid credit card statements as overdue only after due_day when total_due > 0', () => {
+    const cardsWithDue: Account[] = [
+      { ...accounts[0] },
+      { ...accounts[1], due_day: 10 },
+      { id: 'card_31', name: 'Visa 31', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, due_day: 31, created_at: '2026-01-01' },
+    ];
+    const txs = [
+      makeTx({
+        id: 'nov_charge',
+        type: 'expense',
+        amount: 50000,
+        account_id: 'card_ars',
+        category_id: 'otros',
+        description: 'Compra octubre',
+        occurred_at: '2026-10-18',
+      }),
+    ];
+
+    expect(computeCardStatements(cardsWithDue, txs, '2026-11', [], '2026-11-09')[0].is_overdue).toBe(false);
+    expect(computeCardStatements(cardsWithDue, txs, '2026-11', [], '2026-11-10')[0].is_overdue).toBe(false);
+    const overdue = computeCardStatements(cardsWithDue, txs, '2026-11', [], '2026-11-11')[0];
+    expect(overdue.due_day).toBe(10);
+    expect(overdue.due_date).toBe('2026-11-10');
+    expect(overdue.is_overdue).toBe(true);
+
+    // Zero balance card should not be overdue even past due date
+    const zeroCardFeb = computeCardStatements(cardsWithDue, txs, '2027-02', [], '2027-03-05')[1];
+    expect(zeroCardFeb.due_date).toBe('2027-02-28');
+    expect(zeroCardFeb.is_overdue).toBe(false);
+
+    // Paid statement clears overdue state
+    const paidTxs = [
+      ...txs,
+      makeTx({
+        id: 'pay_nov',
+        type: 'transfer',
+        amount: 50000,
+        account_id: 'wallet_main',
+        to_account_id: 'card_ars',
+        description: 'Pago resumen',
+        occurred_at: '2026-11-12',
+        statement_month: '2026-11',
+      }),
+    ];
+    const afterPay = computeCardStatements(cardsWithDue, paidTxs, '2026-11', [], '2026-11-15')[0];
+    expect(afterPay.status).toBe('paid');
+    expect(afterPay.is_overdue).toBe(false);
+
+    // Global period-independent alerts keep flagging 2026-11 even when viewing October 2026
+    const octViewingWithOverdueNov = computePeriodMetrics(cardsWithDue, txs, categories, tags, {
+      from: '2026-10-01',
+      to: '2026-10-31',
+      basis: 'cash',
+      statementMonth: '2026-10',
+      today: '2026-11-26',
+    });
+    expect(octViewingWithOverdueNov.overdue_card_alerts).toEqual([
+      {
+        account_id: 'card_ars',
+        account_name: 'Tarjeta Crédito',
+        currency: 'ARS',
+        statement_month: '2026-11',
+        due_date: '2026-11-10',
+        total_due: 50000,
+      },
+    ]);
+    expect(computeOverdueCardAlerts(cardsWithDue, paidTxs, '2026-11-26')).toEqual([]);
+
+    // Older unpaid statement (e.g., 4+ months back in 2026-08) is also detected when viewing 2026-09 or 2026-11
+    const oldUnpaidTxs = [
+      ...paidTxs,
+      makeTx({
+        id: 'aug_charge',
+        type: 'expense',
+        amount: 12000,
+        account_id: 'card_ars',
+        category_id: 'otros',
+        description: 'Compra julio',
+        occurred_at: '2026-07-15',
+        statement_month: '2026-08',
+      }),
+    ];
+    const sepViewingWithOldOverdue = computePeriodMetrics(cardsWithDue, oldUnpaidTxs, categories, tags, {
+      from: '2026-09-01',
+      to: '2026-09-30',
+      basis: 'cash',
+      statementMonth: '2026-09',
+      today: '2026-11-26',
+    });
+    expect(sepViewingWithOldOverdue.overdue_card_alerts).toEqual([
+      {
+        account_id: 'card_ars',
+        account_name: 'Tarjeta Crédito',
+        currency: 'ARS',
+        statement_month: '2026-08',
+        due_date: '2026-08-10',
+        total_due: 12000,
+      },
+    ]);
   });
 });

@@ -3,15 +3,16 @@
 Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al levantarlo arranca limpio (sin cuentas predefinidas) para que configures tus propios bancos, billeteras, efectivo, cuentas de ahorro/reservas y tarjetas de crédito (ARS, USD u otras monedas) desde el **Dashboard Web** o conversacionalmente por **Telegram**.
 
 ### Características principales
-- **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito, categorías y etiquetas.
-- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`), responder consultas o crear nuevas cuentas/categorías/etiquetas por chat (`/cuentas`).
-- **Tarjetas de crédito con flujo real (Opción B):** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen desde el Dashboard (`💳 Pagar resumen`), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría.
-- **Cuotas, compartidos y proyección futura:** control de compras en cuotas, división de gastos con terceros, filtro interactivo por cuenta/tarjeta/categoría/etiqueta, rango de fechas flexible y proyección a 3 meses vs. tus cuentas de reservas.
+- **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito (con día de vencimiento `due_day`), categorías y etiquetas.
+- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`), pagar resúmenes de TC (`statement_month`), imputar ingresos al mes siguiente (`budget_month`), responder consultas (con resúmenes y vencimientos) o crear cuentas/categorías/etiquetas por chat (`/cuentas`).
+- **Tarjetas de crédito con flujo real (Opción B) y alertas de vencimiento:** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen (`💳 Pagar resumen` o por Telegram), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría. Si configurás el día de vencimiento en la TC, un banner fijo superior avisa cuando hay resúmenes vencidos sin pagar.
+- **Cuotas, suscripciones, compartidos y proyección futura:** control de compras en cuotas, suscripciones asociadas a tarjetas o cuentas líquidas con mes de inicio (`start_month`) desde un único modal (`⚙️ Configurar` → *Fijos / Suscr.* o sección Tarjetas/Proyección), proyección ARS + USD a 3 meses vs. tus cuentas de reservas, división de gastos con terceros, filtro interactivo y mes contable opcional (`budget_month`).
 - **Dashboard Web (PWA + Telegram Mini App):** gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
 
 > 📘 **Arquitectura e infraestructura:** [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md)  
 > 📐 **Modelo contable y casos de uso:** [docs/MODELO_DATOS.md](docs/MODELO_DATOS.md)  
-> 🧭 **Plan v3 agnóstico:** [docs/PLAN_V3_AGNOSTICO.md](docs/PLAN_V3_AGNOSTICO.md)
+> 🧭 **Plan v3 agnóstico:** [docs/PLAN_V3_AGNOSTICO.md](docs/PLAN_V3_AGNOSTICO.md)  
+> 🗺️ **Roadmap y próximos pasos:** [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ---
 

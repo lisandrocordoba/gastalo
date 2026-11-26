@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import { Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Pause, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
 import { formatMoney } from '../api';
-import type { AccountType, AccountWithBalance, Category, Tag } from '../types';
+import type { AccountType, AccountWithBalance, Category, RecurringItem, Tag } from '../types';
 
 interface Props {
   open: boolean;
   accounts: AccountWithBalance[];
   categories: Category[];
   tags: Tag[];
+  recurringItems: RecurringItem[];
   onClose: () => void;
   onCreateAccount: (defaultType: AccountType) => void;
   onEditAccount: (acc: AccountWithBalance) => void;
@@ -25,6 +26,10 @@ interface Props {
   onCreateTag: (name: string, color: string) => Promise<void>;
   onUpdateTag: (id: string, patch: { name: string; color: string }) => Promise<void>;
   onDeleteTag: (id: string) => Promise<void>;
+  onCreateRecurring: () => void;
+  onEditRecurring: (item: RecurringItem) => void;
+  onToggleRecurring: (id: string, active: number) => Promise<void>;
+  onDeleteRecurring: (id: string) => Promise<void>;
 }
 
 const SWATCHES = [
@@ -51,6 +56,7 @@ export function SettingsModal({
   accounts,
   categories,
   tags,
+  recurringItems,
   onClose,
   onCreateAccount,
   onEditAccount,
@@ -60,8 +66,12 @@ export function SettingsModal({
   onCreateTag,
   onUpdateTag,
   onDeleteTag,
+  onCreateRecurring,
+  onEditRecurring,
+  onToggleRecurring,
+  onDeleteRecurring,
 }: Props) {
-  const [tab, setTab] = useState<'accounts' | 'categories' | 'tags'>('accounts');
+  const [tab, setTab] = useState<'accounts' | 'categories' | 'tags' | 'recurring'>('accounts');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -152,12 +162,13 @@ export function SettingsModal({
           </button>
         </div>
 
-        <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl bg-zinc-950 p-1 text-xs font-medium">
+        <div className="mt-3 grid grid-cols-2 gap-1 rounded-xl bg-zinc-950 p-1 text-xs font-medium sm:grid-cols-4">
           {(
             [
               { id: 'accounts', label: `Cuentas y TC (${accounts.length})` },
               { id: 'categories', label: `Categorías (${categories.length})` },
               { id: 'tags', label: `Etiquetas (${tags.length})` },
+              { id: 'recurring', label: `Fijos / Suscr. (${recurringItems.length})` },
             ] as const
           ).map((t) => (
             <button
@@ -224,6 +235,9 @@ export function SettingsModal({
                         </p>
                         <p className="text-[11px] text-zinc-500">
                           {ACCOUNT_TYPE_LABELS[acc.type]} · {acc.currency}
+                          {acc.type === 'credit_card' && acc.due_day
+                            ? ` · vence día ${acc.due_day}`
+                            : ''}
                         </p>
                       </div>
                     </div>
@@ -457,6 +471,93 @@ export function SettingsModal({
                 ))
               )}
             </div>
+          </div>
+        )}
+        {tab === 'recurring' && (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-zinc-400">
+                Suscripciones y gastos fijos mensuales en cuentas líquidas o tarjetas.
+              </p>
+              <button
+                type="button"
+                disabled={accounts.length === 0}
+                onClick={onCreateRecurring}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Nuevo gasto fijo
+              </button>
+            </div>
+
+            {recurringItems.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-xs text-zinc-400">
+                No tenés gastos fijos ni suscripciones cargadas todavía.
+              </p>
+            ) : (
+              <div className="max-h-80 divide-y divide-zinc-800/80 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950/60">
+                {recurringItems.map((item) => {
+                  const acc = accounts.find((a) => a.id === item.account_id);
+                  return (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-2 px-3 py-2.5 text-xs"
+                    >
+                      <div className={`min-w-0 ${item.active === 1 ? 'text-zinc-100' : 'text-zinc-500 line-through'}`}>
+                        <p className="truncate font-semibold">{item.name}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          {acc?.name ?? item.account_id}
+                          {item.start_month ? ` · desde ${item.start_month}` : ''}
+                          {item.day_of_month ? ` · día ${item.day_of_month}` : ''}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <span className="font-semibold text-zinc-200 tabular-nums">
+                          {formatMoney(item.amount, item.currency)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onEditRecurring(item)}
+                          title="Editar"
+                          className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onToggleRecurring(item.id, item.active === 1 ? 0 : 1)}
+                          title={item.active === 1 ? 'Pausar' : 'Activar'}
+                          className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white"
+                        >
+                          {item.active === 1 ? (
+                            <Pause className="h-3.5 w-3.5" />
+                          ) : (
+                            <Play className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (
+                              !window.confirm(
+                                `¿Eliminar "${item.name}"? Los pagos ya registrados no se borran.`
+                              )
+                            ) {
+                              return;
+                            }
+                            await onDeleteRecurring(item.id);
+                          }}
+                          title="Eliminar"
+                          className="rounded-lg p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>

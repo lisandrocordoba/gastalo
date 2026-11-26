@@ -51,6 +51,15 @@ const PARSE_SCHEMA = {
           tags: { type: 'array', items: { type: 'string' } },
           installments_total: { type: ['integer', 'null'] },
           first_installment_month: { type: ['string', 'null'], description: 'Mes YYYY-MM o null' },
+          statement_month: {
+            type: ['string', 'null'],
+            description:
+              'Mes de resumen YYYY-MM para pagos de resumen de tarjeta o cargos asignados a un resumen específico',
+          },
+          budget_month: {
+            type: ['string', 'null'],
+            description: 'Mes contable YYYY-MM opcional si aplica a otro mes (ej. sueldo cobrado a fin de mes para el mes siguiente)',
+          },
           third_party_name: { type: ['string', 'null'] },
           shared_third_party_amount: { type: ['number', 'null'] },
         },
@@ -74,6 +83,10 @@ const PARSE_SCHEMA = {
           currency: { type: ['string', 'null'] },
           initial_balance: { type: ['number', 'null'] },
           is_default: { type: ['boolean', 'null'] },
+          due_day: {
+            type: ['integer', 'null'],
+            description: 'Día de vencimiento (1-31) solo si account_type es credit_card',
+          },
           icon: { type: ['string', 'null'] },
           category_type: {
             type: ['string', 'null'],
@@ -111,6 +124,8 @@ interface RawParsedTransaction {
   tags?: unknown;
   installments_total?: unknown;
   first_installment_month?: unknown;
+  statement_month?: unknown;
+  budget_month?: unknown;
   third_party_name?: unknown;
   shared_third_party_amount?: unknown;
 }
@@ -122,6 +137,7 @@ interface RawManageOperation {
   currency?: unknown;
   initial_balance?: unknown;
   is_default?: unknown;
+  due_day?: unknown;
   icon?: unknown;
   category_type?: unknown;
   color?: unknown;
@@ -168,6 +184,14 @@ export function sanitizeParsedIntent(
             ? Math.round(rawOp.initial_balance * 100) / 100
             : 0;
         const is_default = account_type === 'credit_card' ? false : Boolean(rawOp.is_default);
+        const due_day =
+          account_type === 'credit_card' &&
+          typeof rawOp.due_day === 'number' &&
+          Number.isInteger(rawOp.due_day) &&
+          rawOp.due_day >= 1 &&
+          rawOp.due_day <= 31
+            ? rawOp.due_day
+            : null;
         operations.push({
           action: 'create_account',
           name: cleanName,
@@ -175,6 +199,7 @@ export function sanitizeParsedIntent(
           currency,
           initial_balance,
           is_default,
+          due_day,
         });
       } else if (rawOp.action === 'create_category') {
         const category_type: CategoryType =
@@ -300,6 +325,26 @@ export function sanitizeParsedIntent(
               }
             }
 
+            const budget_month =
+              typeof tx.budget_month === 'string' && /^\d{4}-\d{2}$/.test(tx.budget_month)
+                ? tx.budget_month
+                : null;
+
+            const rawStatementMonth =
+              typeof tx.statement_month === 'string' && /^\d{4}-\d{2}$/.test(tx.statement_month)
+                ? tx.statement_month
+                : null;
+            let statement_month: string | null = null;
+            if (
+              type === 'transfer' &&
+              to_account_id &&
+              accountMap.get(to_account_id)?.type === 'credit_card'
+            ) {
+              statement_month = rawStatementMonth ?? occurred_at.slice(0, 7);
+            } else if (type === 'expense' && accountMap.get(account_id)?.type === 'credit_card') {
+              statement_month = rawStatementMonth;
+            }
+
             const third_party_name =
               typeof tx.third_party_name === 'string' && tx.third_party_name.trim()
                 ? tx.third_party_name.trim().slice(0, 60)
@@ -331,6 +376,8 @@ export function sanitizeParsedIntent(
               tags,
               installments_total,
               first_installment_month,
+              statement_month,
+              budget_month,
               third_party_name,
               shared_third_party_amount,
             };
@@ -370,7 +417,7 @@ export async function parseMessageWithGemini(env: Env, params: ParseInput): Prom
       ? params.accounts
           .map(
             (a) =>
-              `- ${a.id}: ${a.name} (${a.type}, ${a.currency}${a.is_default ? ', PRINCIPAL' : ''})`
+              `- ${a.id}: ${a.name} (${a.type}, ${a.currency}${a.is_default ? ', PRINCIPAL' : ''}${a.type === 'credit_card' && a.due_day ? `, vence día ${a.due_day}` : ''})`
           )
           .join('\n')
       : '(Todavía no hay cuentas creadas)';
@@ -409,27 +456,32 @@ ${emptyAccountsRule}
 REGLAS PARA MOVIMIENTOS (intent: "record"):
 1. Cuenta por defecto: elegí la cuenta marcada como PRINCIPAL (o la cuenta líquida cuyo nombre/tipo mejor coincida con lo mencionado en el mensaje).
 2. Si menciona pagar en dólares / USD y existe una cuenta o tarjeta en moneda USD compatible, elegí esa cuenta y currency: "USD".
-3. Transferencias internas entre cuentas propias (ej. mover dinero hacia ahorros/reservas o pagar el resumen de una tarjeta desde una cuenta líquida): type: "transfer", account_id = origen, to_account_id = destino.
+3. Transferencias internas entre cuentas propias (ej. mover dinero hacia ahorros/reservas o pagar el resumen de una tarjeta desde una cuenta líquida): type: "transfer", account_id = origen, to_account_id = destino. Si es un pago de resumen de tarjeta (destino tipo credit_card), completar statement_month (por defecto el mes de pago YYYY-MM, o el mes de resumen mencionado).
 4. Separación de categorías de gasto si existen en la lista:
    - Compras de abastecimiento del hogar -> "supermercado"
-   - Comidas preparadas / restaurantes / delivery -> "comida_afuera"
-   - Snacks chicos / café al paso -> "kiosco_cafe"
+   - Delivery, comida al paso o almuerzo de trabajo -> "delivery"
+   - Salidas a comer/tomar como plan social, juntadas, bares -> "salidas_social"
+   - Kiosco, snacks, café al paso, golosinas -> "kiosco"
+   - Compras generales, electrónica, hogar -> "compras"
+   - Indumentaria y calzado -> "ropa"
    - Servicios fijos del hogar (luz, agua, gas, internet) -> "servicios"
    - Suscripciones y apps personales -> "suscripciones"
-5. Etiquetas (tags): aplicá solo etiquetas existentes o nuevas en minúscula cuando el contexto del mensaje lo indique claramente (ej. "casa", "hormiga", "familia", "vacaciones", "emergencia").
-6. Inversiones (acciones, bonos, ETFs, criptomonedas, MEP): type: "investment", category_id: null.
-7. Cuotas en tarjeta de crédito: si dice "en X cuotas" o "Xxmonto", installments_total = X, first_installment_month = "${nextMonth}" (salvo que aclare otro mes). amount SIEMPRE es el monto TOTAL de la compra.
-8. Compras compartidas y terceros:
+5. Mes contable (budget_month): si cobra un sueldo/ingreso a fin de mes para cubrir el mes siguiente (ej. "cobré el sueldo de diciembre" o "para el mes que viene"), poner budget_month = "${nextMonth}"; si no aclara otro mes, usar null.
+6. Etiquetas (tags): aplicá solo etiquetas existentes o nuevas en minúscula cuando el contexto del mensaje lo indique claramente (ej. "casa", "hormiga", "familia", "vacaciones", "emergencia").
+7. Inversiones (acciones, bonos, ETFs, criptomonedas, MEP): type: "investment", category_id: null.
+8. Cuotas en tarjeta de crédito: si dice "en X cuotas" o "Xxmonto", installments_total = X, first_installment_month = "${nextMonth}" (salvo que aclare otro mes). amount SIEMPRE es el monto TOTAL de la compra.
+9. Compras compartidas y terceros:
    - Pago 100% para otra persona -> type: "third_party", third_party_name: nombre de la persona, category_id: null.
    - Compra compartida -> type: "expense", amount = total pagado, shared_third_party_amount = parte de la otra persona, third_party_name = nombre.
    - Devolución de dinero de un tercero -> type: "third_party_repayment", third_party_name = nombre, category_id: null.
-9. Abreviaturas comunes: "k" o "lucas" = x1000, "palo" = x1000000.
+10. Abreviaturas comunes: "k" o "lucas" = x1000, "palo" = x1000000.
 
 REGLAS PARA CONFIGURACIÓN (intent: "manage", operations: [...]):
 - Usar cuando el usuario pida explícitamente crear/agregar una cuenta, billetera, caja de ahorro/reservas, efectivo, tarjeta de crédito, categoría o etiqueta (ej. "Creá una cuenta Banco Galicia en ARS", "Agregá tarjeta de crédito Visa en dólares", "Creá la categoría Gimnasio", "Agregá la etiqueta #viaje").
 - account_type válidas: "wallet" (billetera/banco), "savings" (ahorro/reservas), "cash" (efectivo), "credit_card" (tarjeta de crédito).
 - Si aclara saldo inicial ("con saldo inicial 50000"), ponerlo en initial_balance.
 - Si pide marcarla como cuenta principal / por defecto, is_default: true (false para tarjetas).
+- Si es tarjeta de crédito y aclara día de vencimiento ("vence el 10"), ponerlo en due_day (1-31).
 
 REGLAS GENERALES:
 - Si hace una pregunta sobre saldos, gastos, cuotas o resúmenes -> intent: "query", transactions: [], operations: [].
@@ -533,11 +585,36 @@ export async function answerFinancialQuery(
   const projStr = nextMonthProj
     ? `\nProyección próximo mes (${nextMonthProj.month}):
 - Cuotas de tarjeta: ${formatCurrency(nextMonthProj.installments_total_amount)}
-- Gastos fijos mensuales: ${formatCurrency(nextMonthProj.recurring_total_amount)}
+- Gastos fijos mensuales: ${formatCurrency(nextMonthProj.recurring_total_amount)}${
+        nextMonthProj.recurring_usd_total_amount > 0
+          ? `\n- Gastos fijos mensuales USD: ${formatCurrency(nextMonthProj.recurring_usd_total_amount, 'USD')}`
+          : ''
+      }
 - Total comprometido: ${formatCurrency(nextMonthProj.total_committed)}
 - Saldo en cuentas de reservas/ahorro: ${formatCurrency(params.projection?.reservas_balance ?? 0)}
 - Diferencia reservas vs comprometido: ${formatCurrency(params.projection?.next_month_coverage_delta ?? 0)}`
     : '';
+
+  const statementsStr =
+    params.summary.card_statements.length > 0
+      ? params.summary.card_statements
+          .map((s) => {
+            const state = s.status === 'paid' ? 'pagado' : s.is_overdue ? 'VENCIDO' : 'pendiente';
+            const duePart = s.due_date ? `, vence ${s.due_date}` : '';
+            return `- ${s.account_name}: ${formatCurrency(s.total_due, s.currency)} (${state}${duePart})`;
+          })
+          .join('\n')
+      : '(Sin tarjetas)';
+
+  const overdueStr =
+    params.summary.overdue_card_alerts.length > 0
+      ? params.summary.overdue_card_alerts
+          .map(
+            (a) =>
+              `- ${a.account_name} (${a.statement_month}): venció ${a.due_date} · ${formatCurrency(a.total_due, a.currency)}`
+          )
+          .join('\n')
+      : '(Ninguno)';
 
   const prompt = `Pregunta del usuario: "${params.question}"
 
@@ -560,6 +637,12 @@ ${tagsStr || '(Sin etiquetas este mes)'}
 
 Pendiente de terceros (te deben):
 ${tpStr || '(Nada pendiente)'}
+
+Resúmenes de tarjetas (${params.summary.month}):
+${statementsStr}
+
+Resúmenes vencidos sin pagar:
+${overdueStr}
 ${projStr}
 
 Últimos movimientos del mes:

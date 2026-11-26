@@ -35,6 +35,7 @@ export interface Account {
   initial_balance: number;
   color: string;
   is_default: number;
+  due_day?: number | null;
   created_at: string;
 }
 
@@ -46,10 +47,11 @@ export interface AccountInput {
   initial_balance?: number;
   color?: string;
   is_default?: number;
+  due_day?: number | null;
 }
 
 export type AccountPatch = Partial<
-  Pick<Account, 'name' | 'type' | 'currency' | 'initial_balance' | 'color' | 'is_default'>
+  Pick<Account, 'name' | 'type' | 'currency' | 'initial_balance' | 'color' | 'is_default' | 'due_day'>
 >;
 
 export interface AccountWithBalance extends Account {
@@ -98,6 +100,7 @@ export interface Transaction {
   installments_total: number | null;
   first_installment_month: string | null;
   statement_month: string | null;
+  budget_month: string | null;
   third_party_name: string | null;
   linked_group_id: string | null;
   tags: string[];
@@ -120,6 +123,7 @@ export interface TransactionInput {
   installments_total?: number | null;
   first_installment_month?: string | null;
   statement_month?: string | null;
+  budget_month?: string | null;
   third_party_name?: string | null;
   linked_group_id?: string | null;
   tags?: string[];
@@ -154,6 +158,8 @@ export interface ParsedTransactionDraft {
   tags: string[];
   installments_total: number | null;
   first_installment_month: string | null;
+  statement_month: string | null;
+  budget_month: string | null;
   third_party_name: string | null;
   shared_third_party_amount: number | null;
 }
@@ -166,6 +172,7 @@ export type ManageOperation =
       currency: string;
       initial_balance: number;
       is_default: boolean;
+      due_day: number | null;
     }
   | {
       action: 'create_category';
@@ -222,12 +229,26 @@ export interface CardStatementItem {
   occurred_at: string;
 }
 
+export interface CardStatementRecurringItem {
+  recurring_id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  category_id: string | null;
+  day_of_month: number | null;
+  start_month: string | null;
+  posted_transaction_id: string | null;
+}
+
 export interface CardStatement {
   account_id: string;
   account_name: string;
   currency: string;
   card_debt: number;
   statement_month: string;
+  due_day: number | null;
+  due_date: string | null;
+  is_overdue: boolean;
   total_due: number;
   own_total: number;
   third_party_total: number;
@@ -236,6 +257,16 @@ export interface CardStatement {
   paid_at: string | null;
   paid_amount: number | null;
   items: CardStatementItem[];
+  recurring_items: CardStatementRecurringItem[];
+}
+
+export interface OverdueCardAlert {
+  account_id: string;
+  account_name: string;
+  currency: string;
+  statement_month: string;
+  due_date: string;
+  total_due: number;
 }
 
 export interface PayStatementInput {
@@ -267,6 +298,7 @@ export interface MonthSummary {
   third_party_by_person: ThirdPartyBalance[];
   accounts: AccountWithBalance[];
   card_statements: CardStatement[];
+  overdue_card_alerts: OverdueCardAlert[];
 }
 
 export interface MonthlyHistoryPoint {
@@ -284,6 +316,7 @@ export interface RecurringItem {
   account_id: string;
   category_id: string | null;
   day_of_month: number | null;
+  start_month: string | null;
   active: number;
   created_at: string;
 }
@@ -296,6 +329,7 @@ export interface RecurringItemInput {
   account_id: string;
   category_id?: string | null;
   day_of_month?: number | null;
+  start_month?: string | null;
   active?: number;
 }
 
@@ -315,6 +349,7 @@ export interface MonthProjection {
   installments_total_amount: number;
   recurring: RecurringItem[];
   recurring_total_amount: number;
+  recurring_usd_total_amount: number;
   total_committed: number;
 }
 

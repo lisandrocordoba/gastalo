@@ -1,7 +1,7 @@
 # Plan de Evolución v3.0 — Aplicación Agnóstica y Configurable
 
-> **Estado:** Implementado en rama `dev` (Etapas 3.1 → 3.5 listas; pendiente Etapa 3.6 de release a producción).  
-> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Modelo de Datos y Casos de Uso](MODELO_DATOS.md).
+> **Estado:** Completado y desplegado en producción (`v3.0`).  
+> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Modelo de Datos y Casos de Uso](MODELO_DATOS.md) · [Roadmap y Próximos Pasos](ROADMAP.md).
 
 ---
 
@@ -13,7 +13,7 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
 1. **Esquema único inicial limpio (`migrations/0001_initial.sql`):**
    - Crea el esquema completo v3 (`accounts` con `color`, `categories`, `transactions` con cuotas/terceros/`statement_month`, `tags`, `transaction_tags`, `recurring_items`).
    - Arranca con **0 cuentas** y **0 movimientos** (cero menciones a Mercado Pago, BBVA, Efectivo o personas reales).
-   - Incluye únicamente una **base genérica, editable y eliminable** de **17 categorías de gasto + 4 de ingreso** y **5 etiquetas universales** (`#casa`, `#hormiga`, `#familia`, `#vacaciones`, `#emergencia`).
+   - Incluye únicamente una **base genérica, editable y eliminable** de **18 categorías de gasto + 4 de ingreso** y **5 etiquetas universales** (`#casa`, `#hormiga`, `#familia`, `#vacaciones`, `#emergencia`).
 2. **Migración personal 100% fuera de la app:** el script para importar el historial desde *Wallet by BudgetBakers* (`.xls`) vive exclusivamente en local dentro de `imports/` (ignorado en `.gitignore`), completamente separado del código fuente y de las migraciones del proyecto.
 3. **Configuración dual (Web + Telegram):** alta, edición y borrado de **cuentas líquidas, reservas/ahorros, efectivo, tarjetas de crédito (en cualquier moneda), categorías y etiquetas** desde ambos canales.
 4. **Resolución por capacidades, nunca por IDs fijos:** toda la lógica de negocio, Gemini y Telegram opera sobre `is_default`, `type` (`wallet`, `savings`, `cash`, `credit_card`) y `currency`, sin depender jamás de IDs como `'mp'`, `'mp_reservas'` o `'bbva_credito'`.
@@ -37,11 +37,11 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
 
 ## 3. Esquema Consolidado v3 (`migrations/0001_initial.sql`)
 
-- **`accounts`**: `(id, name, type, currency, initial_balance, color, is_default, created_at)` — inicia **vacía**.
-- **`categories`**: `(id, name, icon, type, color)` — base genérica editable/eliminable de **17 categorías de gasto + 4 de ingreso** con paleta de colores coherente.
+- **`accounts`**: `(id, name, type, currency, initial_balance, color, is_default, due_day, created_at)` — inicia **vacía**.
+- **`categories`**: `(id, name, icon, type, color)` — base genérica editable/eliminable de **18 categorías de gasto + 4 de ingreso** con paleta de colores coherente.
 - **`tags`**: `(id, name, color)` — 5 etiquetas iniciales (`#casa`, `#hormiga`, `#familia`, `#vacaciones`, `#emergencia`), editables y eliminables.
-- **`transactions`**: `(id, type, amount, currency, account_id, to_account_id, category_id, description, occurred_at, source, raw_input, telegram_message_id, installments_total, first_installment_month, statement_month, third_party_name, linked_group_id, created_at)`.
-- **`transaction_tags`** (`ON DELETE CASCADE`) y **`recurring_items`**.
+- **`transactions`**: `(id, type, amount, currency, account_id, to_account_id, category_id, description, occurred_at, source, raw_input, telegram_message_id, installments_total, first_installment_month, statement_month, budget_month, third_party_name, linked_group_id, created_at)`.
+- **`transaction_tags`** (`ON DELETE CASCADE`) y **`recurring_items`** (incluye `start_month` para suscripciones y fijos mensuales).
 
 ---
 
@@ -97,7 +97,7 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
    - Tarjeta de bienvenida con pasos claros para crear cuentas/tarjetas desde la Web o por Telegram, más botones directos `+ Nueva cuenta` y `+ Nueva tarjeta`.
 2. **Gestión completa en interfaz:**
    - Botones `+ Nueva cuenta` (en `AccountsGrid`) y `+ Nueva tarjeta` (en `CreditCardsSection`), y botón de edición en cada tarjeta/cuenta (`AccountModal`: nombre, tipo, moneda, color, saldo inicial, predeterminada, eliminar).
-   - Botón `⚙️ Configurar` en el header (`SettingsModal`) con pestañas **Cuentas y TC**, **Categorías** y **Etiquetas**.
+   - Botón `⚙️ Configurar` en el header (`SettingsModal`) con pestañas **Cuentas y TC**, **Categorías**, **Etiquetas** y **Fijos / Suscr.** (+ modal unificado `RecurringModal` para gastos fijos/suscripciones y alertas persistentes por `due_day`).
    - Textos, placeholders y selector de años (`DateRangePicker`) completamente genéricos y dinámicos.
 
 ---

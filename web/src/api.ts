@@ -107,6 +107,7 @@ export interface CreateTransactionPayload {
   installments_total?: number | null;
   first_installment_month?: string | null;
   statement_month?: string | null;
+  budget_month?: string | null;
   third_party_name?: string | null;
 }
 
@@ -163,6 +164,7 @@ export function createAccount(payload: {
   initial_balance?: number;
   color?: string;
   is_default?: number;
+  due_day?: number | null;
 }): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
   return apiFetch('/api/accounts', {
     method: 'POST',
@@ -179,6 +181,7 @@ export function updateAccount(
     initial_balance: number;
     color: string;
     is_default: number;
+    due_day: number | null;
   }>
 ): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
   return apiFetch(`/api/accounts/${encodeURIComponent(id)}`, {
@@ -289,6 +292,7 @@ export function createRecurringItem(input: {
   account_id: string;
   category_id?: string | null;
   day_of_month?: number | null;
+  start_month?: string | null;
   active?: number;
 }): Promise<{ recurringItem: RecurringItem }> {
   return apiFetch('/api/recurring', {
@@ -302,9 +306,11 @@ export function updateRecurringItem(
   patch: Partial<{
     name: string;
     amount: number;
+    currency: string;
     account_id: string;
     category_id: string | null;
     day_of_month: number | null;
+    start_month: string | null;
     active: number;
   }>
 ): Promise<{ recurringItem: RecurringItem }> {

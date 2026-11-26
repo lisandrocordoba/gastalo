@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CreditCard, Download, KeyRound, Plus, RefreshCw, Settings, Sparkles } from 'lucide-react';
+import { AlertTriangle, CreditCard, Download, KeyRound, Plus, RefreshCw, Settings, Sparkles } from 'lucide-react';
 import {
   createAccount,
   createCategory,
@@ -14,6 +14,7 @@ import {
   deleteTransaction,
   downloadCsv,
   fetchBootstrap,
+  formatMoney,
   getStoredToken,
   payCardStatement,
   reconcileAccount,
@@ -33,12 +34,19 @@ import { CurrentStatusBar } from './components/CurrentStatusBar';
 import { DateRangePicker, getMonthRange, type DateRangeValue } from './components/DateRangePicker';
 import { FutureProjectionCard } from './components/FutureProjectionCard';
 import { MonthlyChart } from './components/MonthlyChart';
+import { RecurringModal } from './components/RecurringModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SummaryCards } from './components/SummaryCards';
 import { TagsPanel } from './components/TagsPanel';
 import { TransactionList } from './components/TransactionList';
 import { TransactionModal } from './components/TransactionModal';
-import type { AccountType, AccountWithBalance, BootstrapResponse, Transaction } from './types';
+import type {
+  AccountType,
+  AccountWithBalance,
+  BootstrapResponse,
+  RecurringItem,
+  Transaction,
+} from './types';
 
 function currentMonthStr(): string {
   const now = new Date();
@@ -71,6 +79,11 @@ export function App() {
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountWithBalance | null>(null);
   const [defaultAccountType, setDefaultAccountType] = useState<AccountType>('wallet');
+  const [recurringModalOpen, setRecurringModalOpen] = useState(false);
+  const [editingRecurring, setEditingRecurring] = useState<RecurringItem | null>(null);
+  const [defaultRecurringAccountId, setDefaultRecurringAccountId] = useState<string | undefined>(
+    undefined
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
@@ -87,6 +100,18 @@ export function App() {
     setEditingAccount(acc);
     setDefaultAccountType(acc.type);
     setAccountModalOpen(true);
+  };
+
+  const openCreateRecurringModal = (accountId?: string) => {
+    setEditingRecurring(null);
+    setDefaultRecurringAccountId(accountId);
+    setRecurringModalOpen(true);
+  };
+
+  const openEditRecurringModal = (item: RecurringItem) => {
+    setEditingRecurring(item);
+    setDefaultRecurringAccountId(undefined);
+    setRecurringModalOpen(true);
   };
 
   const loadData = useCallback(
@@ -261,6 +286,43 @@ export function App() {
 
         {data ? (
           <>
+            {data.overdueStatements.length > 0 && (
+              <section
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-rose-500/45 bg-rose-500/10 px-4 py-3 text-xs text-rose-100"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
+                  <span className="font-semibold text-rose-200">
+                    {data.overdueStatements.length === 1
+                      ? 'Resumen vencido sin pagar:'
+                      : `${data.overdueStatements.length} resúmenes vencidos sin pagar:`}
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {data.overdueStatements.map((alert) => (
+                      <button
+                        key={`${alert.account_id}:${alert.statement_month}`}
+                        type="button"
+                        onClick={() => {
+                          setStatementMonth(alert.statement_month);
+                          document
+                            .getElementById('credit-cards-section')
+                            ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-950/60 px-2.5 py-1 text-xs font-medium text-white transition hover:border-rose-300/60 hover:bg-rose-900/60"
+                      >
+                        <span>
+                          {alert.account_name} · {alert.statement_month} (venció {alert.due_date} ·{' '}
+                          {formatMoney(alert.total_due, alert.currency)})
+                        </span>
+                        <span className="text-[11px] text-rose-300">Ir al resumen →</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
             {data.accounts.length === 0 && (
               <section className="rounded-2xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/35 via-zinc-900/90 to-zinc-950 p-5 shadow-xl">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -347,8 +409,22 @@ export function App() {
               onSelectAccount={handleSelectAccount}
               onCreateCard={() => openCreateAccountModal('credit_card')}
               onEditCard={openEditAccountModal}
+              onAddSubscription={(cardId) => openCreateRecurringModal(cardId)}
               onPayStatement={async (cardId, payload) => {
                 await payCardStatement(cardId, payload);
+                await loadData(dateRange, statementMonth);
+              }}
+              onPostRecurringToCard={async (payload) => {
+                await createTransaction({
+                  type: 'expense',
+                  amount: payload.amount,
+                  currency: payload.currency,
+                  account_id: payload.account_id,
+                  category_id: payload.category_id,
+                  description: payload.description,
+                  occurred_at: payload.occurred_at,
+                  statement_month: payload.statement_month,
+                });
                 await loadData(dateRange, statementMonth);
               }}
             />
@@ -374,11 +450,8 @@ export function App() {
                   projection={data.projection}
                   recurringItems={data.recurringItems}
                   accounts={data.accounts}
-                  categories={data.categories}
-                  onCreateRecurring={async (input) => {
-                    await createRecurringItem(input);
-                    await loadData(dateRange, statementMonth);
-                  }}
+                  onAddRecurring={() => openCreateRecurringModal()}
+                  onEditRecurring={openEditRecurringModal}
                   onToggleRecurring={async (id, active) => {
                     await updateRecurringItem(id, { active });
                     await loadData(dateRange, statementMonth);
@@ -474,6 +547,7 @@ export function App() {
           accounts={data.accounts}
           categories={data.categories}
           tags={data.tags}
+          recurringItems={data.recurringItems}
           onClose={() => setSettingsOpen(false)}
           onCreateAccount={(accType) => {
             setSettingsOpen(false);
@@ -507,6 +581,46 @@ export function App() {
           onDeleteTag={async (id) => {
             await deleteTag(id);
             if (selectedTag === id) setSelectedTag('');
+            await loadData(dateRange, statementMonth);
+          }}
+          onCreateRecurring={() => {
+            setSettingsOpen(false);
+            openCreateRecurringModal();
+          }}
+          onEditRecurring={(item) => {
+            setSettingsOpen(false);
+            openEditRecurringModal(item);
+          }}
+          onToggleRecurring={async (id, active) => {
+            await updateRecurringItem(id, { active });
+            await loadData(dateRange, statementMonth);
+          }}
+          onDeleteRecurring={async (id) => {
+            await deleteRecurringItem(id);
+            await loadData(dateRange, statementMonth);
+          }}
+        />
+      )}
+
+      {data && (
+        <RecurringModal
+          open={recurringModalOpen}
+          editing={editingRecurring}
+          defaultAccountId={defaultRecurringAccountId}
+          defaultStartMonth={statementMonth}
+          accounts={data.accounts}
+          categories={data.categories}
+          onClose={() => setRecurringModalOpen(false)}
+          onCreate={async (payload) => {
+            await createRecurringItem(payload);
+            await loadData(dateRange, statementMonth);
+          }}
+          onUpdate={async (id, patch) => {
+            await updateRecurringItem(id, patch);
+            await loadData(dateRange, statementMonth);
+          }}
+          onDelete={async (id) => {
+            await deleteRecurringItem(id);
             await loadData(dateRange, statementMonth);
           }}
         />

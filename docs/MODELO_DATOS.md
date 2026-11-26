@@ -1,7 +1,7 @@
 # Especificación del Modelo de Datos v3 y Guía de Casos de Uso
 
-> **Estado:** Modelo v3 agnóstico en rama `dev`.  
-> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md).
+> **Estado:** Modelo v3.0 agnóstico en producción (`main`).  
+> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) · [Roadmap y Próximos Pasos](ROADMAP.md).
 
 Este documento describe el modelo contable y de datos definido en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql), diseñado para funcionar de forma **agnóstica** con cualquier combinación de bancos, billeteras digitales, cuentas de ahorro, efectivo y tarjetas de crédito en múltiples monedas.
 
@@ -10,14 +10,15 @@ Este documento describe el modelo contable y de datos definido en [`migrations/0
 ## 1. Principios de Diseño
 
 1. **Arranque vacío ("Zero-account start"):** una instancia nueva inicia con **0 cuentas** y **0 movimientos**. Cada usuario crea sus cuentas y tarjetas desde el Dashboard Web (`+ Nueva cuenta`, `+ Nueva tarjeta`, `⚙️ Configurar`) o por Telegram (`"Creá cuenta..."`, `/cuentas`).
-2. **Categorías planas, limpias y editables:** arranca con **17 categorías de gasto + 4 de ingreso**, todas personalizables (nombre, ícono, tipo y color) desde la interfaz o por chat.
-3. **Separación clara entre consumo doméstico y consumos fuera de casa:** distingue `Supermercado`, `Servicios` (hogar), `Comida afuera / Delivery`, `Kiosco / Café / Snacks` y `Suscripciones` (apps personales).
-4. **Etiquetas transversales (`tags`, relación N:M):** permiten cruzar categorías para responder preguntas como *"¿cuánto gasté en `#vacaciones`?"* o *"¿cuánto ahorraría evitando gastos `#hormiga`?"*.
-5. **Contabilidad de doble entrada sin distorsiones (Opción B):**
+2. **Categorías planas, limpias y editables:** arranca con **18 categorías de gasto + 4 de ingreso**, todas personalizables (nombre, ícono, tipo y color) desde la interfaz o por chat.
+3. **Separación clara entre consumo doméstico, delivery y salidas:** distingue `Supermercado`, `Servicios` (hogar), `Delivery` (comida al paso / almuerzo laboral / delivery), `Salidas / Social` (planes sociales), `Kiosco`, `Compras` vs `Ropa`, y `Suscripciones` (asociables también a tarjetas de crédito).
+4. **Mes contable opcional (`budget_month`):** si cobrás a fin de mes (ej. el `29/10` para cubrir noviembre), podés imputar el sueldo al mes siguiente en KPIs y gráficos sin alterar la fecha bancaria real (`occurred_at`) ni el saldo actual.
+5. **Etiquetas transversales (`tags`, relación N:M):** permiten cruzar categorías para responder preguntas como *"¿cuánto gasté en `#vacaciones`?"* o *"¿cuánto ahorraría evitando gastos `#hormiga`?"*.
+6. **Contabilidad de doble entrada sin distorsiones (Opción B):**
    - Los consumos con **tarjeta de crédito** acumulan deuda real en la tarjeta al instante, pero **no** entran en los gastos de consumo del período hasta que se registra el pago del resumen desde una cuenta líquida (`transfer` con `statement_month`).
    - Las transferencias internas entre cuentas propias nunca suman como gasto ni ingreso.
    - Tanto las **inversiones** (`investment`) como los **gastos por cuenta de terceros** (`third_party` / `third_party_repayment`) tienen tipos dedicados.
-6. **Proyección hacia adelante:** seguimiento estructurado de **cuotas** en tarjeta y **gastos fijos mensuales** comparados contra el saldo acumulado en tus cuentas de tipo `savings` (ahorros / reservas).
+7. **Proyección hacia adelante:** seguimiento estructurado de **cuotas** en tarjeta y **gastos fijos mensuales** (`recurring_items`, con mes de inicio `start_month` para evitar mostrar suscripciones en resúmenes o meses anteriores y elegir el primer resumen al asociarlos a una tarjeta) comparados contra el saldo acumulado en tus cuentas de tipo `savings` (ahorros / reservas).
 
 ---
 
@@ -34,6 +35,7 @@ Cada cuenta creada por el usuario tiene:
 - `currency`: código de moneda (`ARS`, `USD`, `EUR`, `BRL`, `CLP`, `UYU`, `MXN`, etc.).
 - `initial_balance`: saldo inicial configurable.
 - `color`: color hexadecimal personalizable para distinguir cuentas en tarjetas y badges de movimientos.
+- `due_day`: *(opcional, `1–31`, solo para `credit_card`)* día de vencimiento del resumen mensual para mostrar alertas cuando un resumen pendiente está vencido.
 
 ---
 
@@ -41,15 +43,16 @@ Cada cuenta creada por el usuario tiene:
 
 *(Todas son editables y eliminables desde `⚙️ Configurar` siempre que no tengan movimientos vinculados en el caso de categorías).*
 
-### A. Categorías de Gasto (17)
+### A. Categorías de Gasto (18)
 | ID (`slug`) | Ícono + Nombre | Ejemplos de uso |
 | :--- | :--- | :--- |
 | `supermercado` | 🛒 Supermercado | Compras para abastecer el hogar: supermercado, almacén, carnicería, verdulería. |
 | `servicios` | 💡 Servicios | Gastos fijos del hogar: luz, agua, gas, internet/wifi, expensas. |
 | `mascotas` | 🐾 Mascotas | Alimento, veterinaria, accesorios. |
-| `comida_afuera` | 🍔 Comida afuera / Delivery | Almuerzos, restaurantes, delivery, rotisería. |
-| `kiosco_cafe` | 🍫 Kiosco / Café / Snacks | Café al paso, snacks, gaseosas, golosinas, helado. |
-| `compras_ropa` | 🛍️ Compras y Ropa | Indumentaria, calzado, electrónica personal, hogar. |
+| `delivery` | 🍔 Delivery | Pedidos de delivery, viandas, almuerzos de trabajo o comida al paso. |
+| `kiosco` | 🍫 Kiosco | Snacks, gaseosas, café al paso, golosinas, helado. |
+| `compras` | 🛍️ Compras | Electrónica, artículos del hogar, herramientas, bazar. |
+| `ropa` | 👕 Ropa | Indumentaria, calzado, accesorios de vestir. |
 | `regalos` | 🎁 Regalos | Cumpleaños, aniversarios, obsequios. |
 | `cuidado_personal` | 💇 Cuidado personal | Peluquería, higiene personal, estética. |
 | `transporte_publico` | 🚌 Transporte público | Colectivo, subte, tren, tarjeta de transporte. |

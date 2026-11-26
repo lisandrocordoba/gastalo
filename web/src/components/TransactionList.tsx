@@ -331,6 +331,11 @@ export function TransactionList({
                           Resumen {tx.statement_month}
                         </span>
                       ) : null}
+                      {tx.budget_month && tx.budget_month !== tx.occurred_at.slice(0, 7) ? (
+                        <span className="rounded-md border border-amber-500/35 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 tabular-nums">
+                          Contable {tx.budget_month}
+                        </span>
+                      ) : null}
                       {tx.third_party_name ? (
                         <span className="rounded-md bg-[#00BFA5]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#00BFA5]">
                           🤝 {tx.third_party_name}

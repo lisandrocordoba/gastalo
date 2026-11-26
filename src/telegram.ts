@@ -1,4 +1,11 @@
-import type { AccountWithBalance, Category, Env, Tag, Transaction } from './types';
+import type {
+  AccountWithBalance,
+  Category,
+  Env,
+  OverdueCardAlert,
+  Tag,
+  Transaction,
+} from './types';
 import {
   ConflictError,
   createAccount,
@@ -255,6 +262,12 @@ function formatTransactionMessage(
   }
 
   lines.push(`• <b>Fecha:</b> ${tx.occurred_at}`);
+  if (tx.statement_month) {
+    lines.push(`• <b>Resumen:</b> ${tx.statement_month}`);
+  }
+  if (tx.budget_month && tx.budget_month !== tx.occurred_at.slice(0, 7)) {
+    lines.push(`• <b>Mes contable:</b> ${tx.budget_month}`);
+  }
   if (statusLine) {
     lines.push(`\n${statusLine}`);
   }
@@ -286,8 +299,10 @@ function formatBalancesText(accounts: AccountWithBalance[]): string {
             ? '💵'
             : '🟦';
     const defaultBadge = acc.is_default ? ' ⭐' : '';
+    const dueBadge =
+      acc.type === 'credit_card' && acc.due_day ? ` <i>(vence día ${acc.due_day})</i>` : '';
     lines.push(
-      `${emoji} <b>${escapeHtml(acc.name)}${defaultBadge}:</b> ${formatCurrency(acc.balance, acc.currency)}`
+      `${emoji} <b>${escapeHtml(acc.name)}${defaultBadge}:</b> ${formatCurrency(acc.balance, acc.currency)}${dueBadge}`
     );
     if (acc.type === 'wallet' || acc.type === 'cash') liquidArs += acc.balance;
     else if (acc.type === 'savings') savingsArs += acc.balance;
@@ -305,13 +320,26 @@ function formatBalancesText(accounts: AccountWithBalance[]): string {
     lines.push('');
     for (const acc of otherCurrencies) {
       const emoji = acc.type === 'credit_card' ? '💳' : '💵';
+      const dueBadge =
+        acc.type === 'credit_card' && acc.due_day ? ` <i>(vence día ${acc.due_day})</i>` : '';
       lines.push(
-        `${emoji} <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, acc.currency)}`
+        `${emoji} <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, acc.currency)}${dueBadge}`
       );
     }
   }
 
   return lines.join('\n');
+}
+
+function formatOverdueAlertsLines(alerts: OverdueCardAlert[]): string[] {
+  if (alerts.length === 0) return [];
+  const lines = ['\n🚨 <b>Resúmenes vencidos sin pagar:</b>'];
+  for (const a of alerts) {
+    lines.push(
+      `• ${escapeHtml(a.account_name)} (${a.statement_month}): venció ${a.due_date} · ${formatCurrency(a.total_due, a.currency)}`
+    );
+  }
+  return lines;
 }
 
 async function handleCommand(env: Env, chatId: number, command: string): Promise<void> {
@@ -365,9 +393,11 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
   }
 
   if (cmd === '/saldos') {
-    const month = currentMonthInTimezone(tz);
-    const summary = await getMonthSummary(env.DB, month);
+    const today = todayInTimezone(tz);
+    const month = today.slice(0, 7);
+    const summary = await getMonthSummary(env.DB, month, 'cash', today);
     const lines = [formatBalancesText(summary.accounts)];
+    lines.push(...formatOverdueAlertsLines(summary.overdue_card_alerts));
     if (summary.third_party_by_person.length > 0) {
       lines.push('\n🤝 <b>Pendiente de terceros (te deben):</b>');
       for (const p of summary.third_party_by_person) {
@@ -379,8 +409,9 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
   }
 
   if (cmd === '/resumen' || cmd === '/mes') {
-    const month = currentMonthInTimezone(tz);
-    const summary = await getMonthSummary(env.DB, month);
+    const today = todayInTimezone(tz);
+    const month = today.slice(0, 7);
+    const summary = await getMonthSummary(env.DB, month, 'cash', today);
     const lines = [
       `📅 <b>Resumen ${month}</b>\n`,
       `💚 <b>Ingresos:</b> ${formatCurrency(summary.income)}`,
@@ -396,6 +427,8 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
     if (summary.usd_expense > 0) {
       lines.push(`💵 <b>Gastos USD:</b> ${formatCurrency(summary.usd_expense, 'USD')}`);
     }
+
+    lines.push(...formatOverdueAlertsLines(summary.overdue_card_alerts));
 
     if (summary.by_category.length > 0) {
       lines.push('\n<b>Top categorías:</b>');
@@ -429,8 +462,12 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
     const lines = ['🔮 <b>Proyección próximos 3 meses</b>\n'];
 
     for (const m of proj.months) {
+      const usdPart =
+        m.recurring_usd_total_amount > 0
+          ? ` + ${formatCurrency(m.recurring_usd_total_amount, 'USD')}`
+          : '';
       lines.push(
-        `📅 <b>${m.month}:</b> ${formatCurrency(m.total_committed)} <i>(Cuotas ${formatCurrency(m.installments_total_amount)} + Fijos ${formatCurrency(m.recurring_total_amount)})</i>`
+        `📅 <b>${m.month}:</b> ${formatCurrency(m.total_committed)} <i>(Cuotas ${formatCurrency(m.installments_total_amount)} + Fijos ${formatCurrency(m.recurring_total_amount)}${usdPart})</i>`
       );
       for (const inst of m.installments.slice(0, 5)) {
         lines.push(
@@ -721,7 +758,12 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
   if (action === 'cat' && param) {
     await updateTransaction(env.DB, txId, { category_id: param });
   } else if (action === 'acc' && param) {
-    await updateTransaction(env.DB, txId, { account_id: param });
+    const accList = await listAccountsWithBalances(env.DB);
+    const targetAcc = accList.find((a) => a.id === param);
+    await updateTransaction(env.DB, txId, {
+      account_id: param,
+      ...(targetAcc ? { currency: targetAcc.currency } : {}),
+    });
   }
 
   const [tx, accounts, categories] = await Promise.all([
@@ -834,6 +876,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
             initial_balance: op.initial_balance,
             color: defaultColorForAccountType(op.account_type),
             is_default: op.is_default ? 1 : 0,
+            due_day: op.due_day,
           });
           const typeLabel =
             created.type === 'credit_card'
@@ -843,15 +886,19 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
                 : created.type === 'cash'
                   ? 'Efectivo'
                   : 'Billetera / Banco';
+          const infoLines = [
+            '✅ <b>Cuenta creada</b>',
+            `• <b>Nombre:</b> ${escapeHtml(created.name)}${created.is_default ? ' ⭐ (Principal)' : ''}`,
+            `• <b>Tipo:</b> ${typeLabel} (${created.currency})`,
+            `• <b>Saldo inicial:</b> ${formatCurrency(created.initial_balance, created.currency)}`,
+          ];
+          if (created.due_day) {
+            infoLines.push(`• <b>Vencimiento:</b> día ${created.due_day}`);
+          }
           await sendMessage(
             env.TELEGRAM_BOT_TOKEN,
             chatId,
-            [
-              '✅ <b>Cuenta creada</b>',
-              `• <b>Nombre:</b> ${escapeHtml(created.name)}${created.is_default ? ' ⭐ (Principal)' : ''}`,
-              `• <b>Tipo:</b> ${typeLabel} (${created.currency})`,
-              `• <b>Saldo inicial:</b> ${formatCurrency(created.initial_balance, created.currency)}`,
-            ].join('\n'),
+            infoLines.join('\n'),
             [[{ text: '🗑️ Eliminar', callback_data: `delacc:${created.id}` }]]
           );
         } else if (op.action === 'create_category') {
@@ -881,11 +928,11 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
     }
 
     if (parsed.intent === 'query') {
-      const month = currentMonthInTimezone(tz);
+      const month = today.slice(0, 7);
       const nextMonth = addMonths(month, 1);
       const defaultCurrency = env.DEFAULT_CURRENCY || 'ARS';
       const [summary, recent, projection] = await Promise.all([
-        getMonthSummary(env.DB, month),
+        getMonthSummary(env.DB, month, 'cash', today),
         listTransactions(env.DB, { month, limit: 30 }),
         getFutureProjection(env.DB, nextMonth, 3, defaultCurrency),
       ]);
@@ -983,6 +1030,8 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
         telegram_message_id: message.message_id,
         installments_total: draft.installments_total,
         first_installment_month: draft.first_installment_month,
+        statement_month: draft.statement_month,
+        budget_month: draft.budget_month,
         third_party_name: draft.third_party_name,
         tags: draft.tags,
       });

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -25,6 +26,7 @@ interface Props {
   onSelectAccount: (accountId: string) => void;
   onCreateCard: () => void;
   onEditCard: (acc: AccountWithBalance) => void;
+  onAddSubscription: (cardId?: string) => void;
   onPayStatement: (
     cardId: string,
     payload: {
@@ -36,12 +38,38 @@ interface Props {
       description?: string;
     }
   ) => Promise<void>;
+  onPostRecurringToCard: (payload: {
+    account_id: string;
+    currency: string;
+    amount: number;
+    category_id: string | null;
+    description: string;
+    occurred_at: string;
+    statement_month: string;
+  }) => Promise<void>;
 }
 
 function shiftYm(ym: string, delta: number): string {
   const [y, m] = ym.split('-').map(Number);
   const d = new Date(Date.UTC(y, m - 1 + delta, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function resolveRecurringChargeDate(
+  statementMonth: string,
+  dayOfMonth: number | null,
+  today: string
+): string {
+  if (dayOfMonth && Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31) {
+    const [y, m] = statementMonth.split('-').map(Number);
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const clampedDay = Math.min(dayOfMonth, lastDay);
+    return `${statementMonth}-${String(clampedDay).padStart(2, '0')}`;
+  }
+  if (today.startsWith(`${statementMonth}-`)) {
+    return today;
+  }
+  return `${statementMonth}-01`;
 }
 
 export function CreditCardsSection({
@@ -55,7 +83,9 @@ export function CreditCardsSection({
   onSelectAccount,
   onCreateCard,
   onEditCard,
+  onAddSubscription,
   onPayStatement,
+  onPostRecurringToCard,
 }: Props) {
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [payingStatement, setPayingStatement] = useState<CardStatement | null>(null);
@@ -65,6 +95,8 @@ export function CreditCardsSection({
   const [payDate, setPayDate] = useState(defaultPayDate);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [recurringDrafts, setRecurringDrafts] = useState<Record<string, string>>({});
+  const [postingRecId, setPostingRecId] = useState<string | null>(null);
 
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const catMap = new Map(categories.map((c) => [c.id, c]));
@@ -114,7 +146,7 @@ export function CreditCardsSection({
   };
 
   return (
-    <section>
+    <section id="credit-cards-section" className="scroll-mt-20">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="flex items-center gap-2">
@@ -137,6 +169,18 @@ export function CreditCardsSection({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {statements.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onAddSubscription(hasSelectedCard ? selectedAccount : statements[0]?.account_id)
+              }
+              className="inline-flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-sky-500/50 hover:bg-zinc-800"
+            >
+              <Plus className="h-3.5 w-3.5 text-sky-400" />
+              Suscripción
+            </button>
+          )}
           <button
             type="button"
             onClick={onCreateCard}
@@ -187,8 +231,13 @@ export function CreditCardsSection({
         {statements.map((st) => {
           const isExpanded = expandedCardId === st.account_id;
           const isPaid = st.status === 'paid';
+          const isDueToday =
+            !isPaid && !st.is_overdue && st.total_due > 0 && st.due_date === defaultPayDate;
           const isSelected = selectedAccount === st.account_id;
           const cardAccount = accMap.get(st.account_id);
+          const visibleRecurring = isPaid
+            ? st.recurring_items.filter((r) => Boolean(r.posted_transaction_id))
+            : st.recurring_items;
 
           return (
             <div
@@ -197,7 +246,9 @@ export function CreditCardsSection({
               className={`flex cursor-pointer flex-col justify-between rounded-2xl border bg-gradient-to-br from-zinc-900 via-zinc-950 to-black p-4 shadow-lg transition-all ${
                 isSelected
                   ? 'border-emerald-400/70 ring-2 ring-emerald-400/80'
-                  : 'border-zinc-700/80 hover:border-zinc-500/80'
+                  : st.is_overdue
+                    ? 'border-rose-500/60 hover:border-rose-400/80'
+                    : 'border-zinc-700/80 hover:border-zinc-500/80'
               }`}
             >
               <div>
@@ -223,12 +274,24 @@ export function CreditCardsSection({
                       className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
                         isPaid
                           ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300'
-                          : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
+                          : st.is_overdue
+                            ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                            : isDueToday
+                              ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
+                              : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
                       }`}
                     >
                       {isPaid ? (
                         <>
                           <CheckCircle2 className="h-3 w-3" /> Pagado
+                        </>
+                      ) : st.is_overdue ? (
+                        <>
+                          <AlertTriangle className="h-3 w-3" /> Vencido
+                        </>
+                      ) : isDueToday ? (
+                        <>
+                          <Clock className="h-3 w-3" /> Vence hoy
                         </>
                       ) : (
                         <>
@@ -278,6 +341,28 @@ export function CreditCardsSection({
                   </p>
                 )}
 
+                {!isPaid && st.due_date && (
+                  <p
+                    className={`mt-1 text-[11px] tabular-nums ${
+                      st.is_overdue
+                        ? 'font-medium text-rose-400'
+                        : isDueToday
+                          ? 'font-medium text-orange-300'
+                          : st.total_due > 0
+                            ? 'text-zinc-400'
+                            : 'text-zinc-500'
+                    }`}
+                  >
+                    {st.is_overdue
+                      ? `Venció el ${st.due_date}`
+                      : isDueToday
+                        ? `Vence hoy (${st.due_date})`
+                        : st.total_due > 0
+                          ? `Vence el ${st.due_date}`
+                          : `Vencimiento día ${st.due_day}`}
+                  </p>
+                )}
+
                 {isPaid && st.paid_amount !== null && (
                   <p className="mt-1 text-[11px] text-emerald-400 tabular-nums">
                     Pagado el {st.paid_at}: {formatMoney(st.paid_amount, st.currency)}
@@ -300,7 +385,10 @@ export function CreditCardsSection({
                     ) : (
                       <ChevronDown className="h-3.5 w-3.5" />
                     )}
-                    {st.items.length} {st.items.length === 1 ? 'ítem' : 'ítems'} en resumen
+                    {st.items.length} {st.items.length === 1 ? 'ítem' : 'ítems'}
+                    {visibleRecurring.length > 0
+                      ? ` · ${visibleRecurring.length} suscr.`
+                      : ''}
                   </button>
 
                   {!isPaid && (
@@ -320,7 +408,7 @@ export function CreditCardsSection({
                 {isExpanded && (
                   <div
                     onClick={(e) => e.stopPropagation()}
-                    className="max-h-40 space-y-1.5 overflow-y-auto rounded-xl bg-zinc-950/90 p-2.5 text-xs"
+                    className="max-h-56 space-y-2 overflow-y-auto rounded-xl bg-zinc-950/90 p-2.5 text-xs"
                   >
                     {st.items.length === 0 ? (
                       <p className="text-zinc-500">Sin cuotas registradas para este mes.</p>
@@ -345,6 +433,78 @@ export function CreditCardsSection({
                           </div>
                         );
                       })
+                    )}
+
+                    {visibleRecurring.length > 0 && (
+                      <div className="border-t border-zinc-800 pt-2">
+                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                          Suscripciones asociadas
+                        </p>
+                        <div className="space-y-1.5">
+                          {visibleRecurring.map((rec) => {
+                            const draftKey = `${st.account_id}:${st.statement_month}:${rec.recurring_id}`;
+                            const draftVal = recurringDrafts[draftKey] ?? String(rec.amount);
+                            const isPosting = postingRecId === draftKey;
+                            return (
+                              <div
+                                key={rec.recurring_id}
+                                className="flex items-center justify-between gap-2"
+                              >
+                                <span className="truncate text-zinc-300">🔁 {rec.name}</span>
+                                {rec.posted_transaction_id ? (
+                                  <span className="shrink-0 rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                                    ✅ En resumen
+                                  </span>
+                                ) : (
+                                  <div className="flex shrink-0 items-center gap-1">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={draftVal}
+                                      onChange={(e) =>
+                                        setRecurringDrafts((prev) => ({
+                                          ...prev,
+                                          [draftKey]: e.target.value,
+                                        }))
+                                      }
+                                      className="w-20 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-right text-[11px] text-zinc-100 tabular-nums outline-none focus:border-emerald-500"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={isPosting}
+                                      onClick={async () => {
+                                        const amt = Number(draftVal);
+                                        if (!Number.isFinite(amt) || amt <= 0) return;
+                                        setPostingRecId(draftKey);
+                                        try {
+                                          await onPostRecurringToCard({
+                                            account_id: st.account_id,
+                                            currency: rec.currency || st.currency,
+                                            amount: amt,
+                                            category_id: rec.category_id,
+                                            description: rec.name,
+                                            occurred_at: resolveRecurringChargeDate(
+                                              st.statement_month,
+                                              rec.day_of_month,
+                                              defaultPayDate
+                                            ),
+                                            statement_month: st.statement_month,
+                                          });
+                                        } finally {
+                                          setPostingRecId(null);
+                                        }
+                                      }}
+                                      className="rounded-md bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                                    >
+                                      {isPosting ? '...' : '+ Cargar'}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}

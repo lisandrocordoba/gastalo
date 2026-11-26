@@ -93,7 +93,8 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 
 ### Estrategia de ramas (Git)
 - **`main`**: representa **exactamente** lo que está desplegado en producción. Nunca se edita código experimental directo en `main`.
-- **`feat/<etapa>`** (o `dev`): ramas de trabajo para nuevas funcionalidades (por ejemplo `feat/modelo-datos-wallet`, `feat/importador-csv`, `feat/resumen-bbva`).
+- **`dev`**: rama de integración estable antes de pasar a `main`.
+- **Ramas temáticas (`feat/*`, `test/*`, `fix/*`)**: una rama por cada nueva funcionalidad, suite de tests o corrección (detalle en [Roadmap y Próximos Pasos](ROADMAP.md)).
 
 ### Ciclo obligatorio antes de pasar a producción
 1. **Desarrollar en local:**
@@ -114,9 +115,9 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 
 ## 6. Modelo de Datos Agnóstico (v3)
 
-El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **21 categorías** y **5 etiquetas**:
-- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en cualquier moneda, con color propio y flag `is_default`.
-- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B), terceros y compras compartidas (`linked_group_id`).
-- **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales.
+El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **22 categorías (18 de gasto + 4 de ingreso)** y **5 etiquetas**:
+- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en cualquier moneda, con color propio, flag `is_default` y vencimiento opcional `due_day` para tarjetas.
+- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
+- **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales / suscripciones con mes de inicio (`start_month`).
 
-Para el detalle completo de reglas contables y casos de uso, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md) y [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md).
+Para el detalle completo de reglas contables, casos de uso y evolución, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md), [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) y [Roadmap y Próximos Pasos](ROADMAP.md).

@@ -7,6 +7,7 @@ import type {
   AccountingBasis,
   CardStatement,
   CardStatementItem,
+  CardStatementRecurringItem,
   Category,
   CategoryBreakdown,
   CategoryInput,
@@ -15,6 +16,7 @@ import type {
   MonthProjection,
   MonthSummary,
   MonthlyHistoryPoint,
+  OverdueCardAlert,
   PayStatementInput,
   ProjectedInstallment,
   RecurringItem,
@@ -37,6 +39,7 @@ import {
   shortId,
   slugifyId,
   slugifyTag,
+  todayInTimezone,
 } from './utils';
 
 export class ConflictError extends Error {
@@ -78,6 +81,25 @@ type RawTransactionRow = Omit<Transaction, 'tags'>;
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+function normalizeMonth(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return /^\d{4}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function normalizeDueDay(value: number | null | undefined, type: AccountType): number | null {
+  if (type !== 'credit_card') return null;
+  if (value === null || value === undefined) return null;
+  return Number.isInteger(value) && value >= 1 && value <= 31 ? value : null;
+}
+
+function resolveDayInMonth(ym: string, day: number): string {
+  const [y, m] = ym.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const clamped = Math.min(day, lastDay);
+  return `${ym}-${String(clamped).padStart(2, '0')}`;
 }
 
 export function computeAccountBalances(
@@ -146,14 +168,26 @@ export function computeThirdPartyBalances(
   };
 }
 
+export function effectiveTransactionDate(
+  tx: Pick<Transaction, 'occurred_at' | 'budget_month'>
+): string {
+  if (tx.budget_month && /^\d{4}-\d{2}$/.test(tx.budget_month)) {
+    return `${tx.budget_month}-01`;
+  }
+  return tx.occurred_at;
+}
+
 export function computeCardStatements(
   accounts: Account[],
   transactions: Transaction[],
-  statementMonth: string
+  statementMonth: string,
+  recurringItems: RecurringItem[] = [],
+  today?: string
 ): CardStatement[] {
   const balances = computeAccountBalances(accounts, transactions);
   const balanceMap = new Map(balances.map((a) => [a.id, a.balance]));
   const cardAccounts = accounts.filter((a) => a.type === 'credit_card');
+  const todayDate = today ?? todayInTimezone();
 
   return cardAccounts.map((card) => {
     const items: CardStatementItem[] = [];
@@ -222,12 +256,54 @@ export function computeCardStatements(
         t.statement_month === statementMonth
     );
 
+    const cardRecurring = recurringItems
+      .filter((r) => {
+        if (r.active !== 1 || r.type !== 'expense' || r.account_id !== card.id) return false;
+        const startMonth = normalizeMonth(r.start_month);
+        if (startMonth && statementMonth < startMonth) {
+          return false;
+        }
+        return true;
+      })
+      .map((r): CardStatementRecurringItem => {
+        const needle = r.name.trim().toLowerCase();
+        const matchedTx = transactions.find((tx) => {
+          if (tx.account_id !== card.id || tx.type !== 'expense') return false;
+          if (!tx.description.toLowerCase().includes(needle)) return false;
+          const dueMonth =
+            tx.statement_month && /^\d{4}-\d{2}$/.test(tx.statement_month)
+              ? tx.statement_month
+              : addMonths(tx.occurred_at.slice(0, 7), 1);
+          return dueMonth === statementMonth;
+        });
+        return {
+          recurring_id: r.id,
+          name: r.name,
+          amount: r.amount,
+          currency: r.currency,
+          category_id: r.category_id,
+          day_of_month: r.day_of_month,
+          start_month: r.start_month ?? null,
+          posted_transaction_id: matchedTx?.id ?? null,
+        };
+      });
+
+    const dueDay =
+      card.due_day && Number.isInteger(card.due_day) && card.due_day >= 1 && card.due_day <= 31
+        ? card.due_day
+        : null;
+    const dueDate = dueDay ? resolveDayInMonth(statementMonth, dueDay) : null;
+    const isOverdue = !paymentTx && totalDue > 0 && dueDate !== null && todayDate > dueDate;
+
     return {
       account_id: card.id,
       account_name: card.name,
       currency: card.currency,
       card_debt: balanceMap.get(card.id) ?? 0,
       statement_month: statementMonth,
+      due_day: dueDay,
+      due_date: dueDate,
+      is_overdue: isOverdue,
       total_due: totalDue,
       own_total: ownTotal,
       third_party_total: thirdPartyTotal,
@@ -236,8 +312,78 @@ export function computeCardStatements(
       paid_at: paymentTx?.occurred_at ?? null,
       paid_amount: paymentTx ? paymentTx.amount : null,
       items,
+      recurring_items: cardRecurring,
     };
   });
+}
+
+export function computeOverdueCardAlerts(
+  accounts: Account[],
+  transactions: Transaction[],
+  today?: string
+): OverdueCardAlert[] {
+  const dueCardIds = new Set(
+    accounts
+      .filter(
+        (a) =>
+          a.type === 'credit_card' &&
+          a.due_day !== null &&
+          a.due_day !== undefined &&
+          Number.isInteger(a.due_day) &&
+          a.due_day >= 1 &&
+          a.due_day <= 31
+      )
+      .map((a) => a.id)
+  );
+  if (dueCardIds.size === 0) return [];
+
+  const todayDate = today ?? todayInTimezone();
+  const currentYm = todayDate.slice(0, 7);
+  const candidateMonths = new Set<string>([currentYm]);
+
+  for (const tx of transactions) {
+    if (!dueCardIds.has(tx.account_id)) continue;
+    if (tx.type !== 'expense' && tx.type !== 'third_party') continue;
+
+    if (tx.installments_total && tx.installments_total >= 2) {
+      const firstMonth =
+        normalizeMonth(tx.first_installment_month) ?? addMonths(tx.occurred_at.slice(0, 7), 1);
+      for (let i = 0; i < tx.installments_total; i++) {
+        const m = addMonths(firstMonth, i);
+        if (m <= currentYm) {
+          candidateMonths.add(m);
+        }
+      }
+    } else {
+      const dueMonth =
+        normalizeMonth(tx.statement_month) ??
+        normalizeMonth(tx.first_installment_month) ??
+        addMonths(tx.occurred_at.slice(0, 7), 1);
+      if (dueMonth <= currentYm) {
+        candidateMonths.add(dueMonth);
+      }
+    }
+  }
+
+  const alerts: OverdueCardAlert[] = [];
+  for (const m of Array.from(candidateMonths).sort()) {
+    const statements = computeCardStatements(accounts, transactions, m, [], todayDate);
+    for (const st of statements) {
+      if (st.is_overdue && st.due_date) {
+        alerts.push({
+          account_id: st.account_id,
+          account_name: st.account_name,
+          currency: st.currency,
+          statement_month: st.statement_month,
+          due_date: st.due_date,
+          total_due: st.total_due,
+        });
+      }
+    }
+  }
+
+  alerts.sort((a, b) => a.due_date.localeCompare(b.due_date) || a.account_name.localeCompare(b.account_name));
+  return alerts;
 }
 
 export function computePeriodMetrics(
@@ -245,17 +391,25 @@ export function computePeriodMetrics(
   transactions: Transaction[],
   categories: Category[],
   tags: Tag[],
-  options: { from: string; to: string; basis: AccountingBasis; statementMonth?: string }
+  options: {
+    from: string;
+    to: string;
+    basis: AccountingBasis;
+    statementMonth?: string;
+    recurringItems?: RecurringItem[];
+    today?: string;
+  }
 ): MonthSummary {
   const { from, to, basis } = options;
   const statementMonth = options.statementMonth ?? to.slice(0, 7);
+  const recurringItems = options.recurringItems ?? [];
   const cardAccountIds = new Set(accounts.filter((a) => a.type === 'credit_card').map((a) => a.id));
   const statementCache = new Map<string, CardStatement[]>();
 
   const getCardStatement = (cardId: string, month: string): CardStatement | undefined => {
     let list = statementCache.get(month);
     if (!list) {
-      list = computeCardStatements(accounts, transactions, month);
+      list = computeCardStatements(accounts, transactions, month, recurringItems, options.today);
       statementCache.set(month, list);
     }
     return list.find((s) => s.account_id === cardId);
@@ -271,7 +425,8 @@ export function computePeriodMetrics(
   const tagTotals = new Map<string, number>();
 
   for (const tx of transactions) {
-    if (tx.occurred_at < from || tx.occurred_at > to) continue;
+    const effDate = effectiveTransactionDate(tx);
+    if (effDate < from || effDate > to) continue;
 
     if (tx.type === 'income') {
       if (tx.currency === 'ARS') income += tx.amount;
@@ -376,7 +531,14 @@ export function computePeriodMetrics(
 
   const thirdParty = computeThirdPartyBalances(transactions);
   const accountsWithBalances = computeAccountBalances(accounts, transactions);
-  const cardStatements = computeCardStatements(accounts, transactions, statementMonth);
+  const cardStatements = computeCardStatements(
+    accounts,
+    transactions,
+    statementMonth,
+    recurringItems,
+    options.today
+  );
+  const overdueCardAlerts = computeOverdueCardAlerts(accounts, transactions, options.today);
 
   return {
     month: from.slice(0, 7),
@@ -397,6 +559,7 @@ export function computePeriodMetrics(
     third_party_by_person: thirdParty.by_person,
     accounts: accountsWithBalances,
     card_statements: cardStatements,
+    overdue_card_alerts: overdueCardAlerts,
   };
 }
 
@@ -410,10 +573,12 @@ export function computeFutureProjection(
   startMonth: string,
   monthsAhead = 3
 ): FutureProjection {
-  const activeRecurring = recurringItems.filter(
+  const activeRecurringArs = recurringItems.filter(
     (item) => item.active === 1 && item.type === 'expense' && item.currency === 'ARS'
   );
-  const recurringTotal = round2(activeRecurring.reduce((sum, item) => sum + item.amount, 0));
+  const activeRecurringUsd = recurringItems.filter(
+    (item) => item.active === 1 && item.type === 'expense' && item.currency === 'USD'
+  );
 
   const months: MonthProjection[] = [];
   for (let i = 0; i < monthsAhead; i++) {
@@ -440,6 +605,17 @@ export function computeFutureProjection(
       }
     }
 
+    const monthRecurringArs = activeRecurringArs.filter((item) => {
+      const itemStart = normalizeMonth(item.start_month);
+      return !itemStart || targetMonth >= itemStart;
+    });
+    const monthRecurringUsd = activeRecurringUsd.filter((item) => {
+      const itemStart = normalizeMonth(item.start_month);
+      return !itemStart || targetMonth >= itemStart;
+    });
+    const recurringTotal = round2(monthRecurringArs.reduce((sum, item) => sum + item.amount, 0));
+    const recurringUsdTotal = round2(monthRecurringUsd.reduce((sum, item) => sum + item.amount, 0));
+
     const installmentsTotal = round2(
       installments.reduce((sum, item) => sum + item.installment_amount, 0)
     );
@@ -447,8 +623,9 @@ export function computeFutureProjection(
       month: targetMonth,
       installments,
       installments_total_amount: installmentsTotal,
-      recurring: activeRecurring,
+      recurring: monthRecurringArs,
       recurring_total_amount: recurringTotal,
+      recurring_usd_total_amount: recurringUsdTotal,
       total_committed: round2(installmentsTotal + recurringTotal),
     });
   }
@@ -506,12 +683,14 @@ async function loadAllDataForAnalysis(db: D1Database): Promise<{
   categories: Category[];
   tags: Tag[];
   transactions: Transaction[];
+  recurringItems: RecurringItem[];
 }> {
-  const [accRes, txRes, categories, tags] = await Promise.all([
+  const [accRes, txRes, categories, tags, recurringItems] = await Promise.all([
     db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, name ASC').all<Account>(),
     db.prepare('SELECT * FROM transactions ORDER BY occurred_at DESC, created_at DESC').all<RawTransactionRow>(),
     listCategories(db),
     listTags(db),
+    listRecurringItems(db),
   ]);
   const transactions = await hydrateTransactionTags(db, txRes.results ?? []);
   return {
@@ -519,6 +698,7 @@ async function loadAllDataForAnalysis(db: D1Database): Promise<{
     categories,
     tags,
     transactions,
+    recurringItems,
   };
 }
 
@@ -608,12 +788,14 @@ export async function createAccount(db: D1Database, input: AccountInput): Promis
     await db.prepare('UPDATE accounts SET is_default = 0').run();
   }
 
+  const dueDay = normalizeDueDay(input.due_day, input.type);
+
   await db
     .prepare(
-      `INSERT INTO accounts (id, name, type, currency, initial_balance, color, is_default, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (id, name, type, currency, initial_balance, color, is_default, due_day, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(id, cleanName, input.type, currency, initialBalance, color, isDefault, createdAt)
+    .bind(id, cleanName, input.type, currency, initialBalance, color, isDefault, dueDay, createdAt)
     .run();
 
   const accounts = await listAccountsWithBalances(db);
@@ -676,13 +858,18 @@ export async function updateAccount(
     await db.prepare('UPDATE accounts SET is_default = 0 WHERE id != ?').bind(id).run();
   }
 
+  const nextDueDay =
+    patch.due_day !== undefined
+      ? normalizeDueDay(patch.due_day, nextType)
+      : normalizeDueDay(existing.due_day ?? null, nextType);
+
   await db
     .prepare(
       `UPDATE accounts
-       SET name = ?, type = ?, currency = ?, initial_balance = ?, color = ?, is_default = ?
+       SET name = ?, type = ?, currency = ?, initial_balance = ?, color = ?, is_default = ?, due_day = ?
        WHERE id = ?`
     )
-    .bind(nextName, nextType, nextCurrency, nextInitial, nextColor, nextIsDefault, id)
+    .bind(nextName, nextType, nextCurrency, nextInitial, nextColor, nextIsDefault, nextDueDay, id)
     .run();
 
   if (existing.is_default === 1 && nextIsDefault === 0) {
@@ -831,12 +1018,12 @@ export async function payCardStatement(
     source: 'web_statement_pay',
   });
 
-  const { accounts, transactions } = await loadAllDataForAnalysis(db);
+  const { accounts, transactions, recurringItems } = await loadAllDataForAnalysis(db);
   return {
     transfer,
     feesTx,
     accounts: computeAccountBalances(accounts, transactions),
-    cardStatements: computeCardStatements(accounts, transactions, input.statement_month),
+    cardStatements: computeCardStatements(accounts, transactions, input.statement_month, recurringItems),
   };
 }
 
@@ -958,14 +1145,16 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
       : installmentsTotal
         ? input.occurred_at.slice(0, 7)
         : null;
+  const budgetMonth =
+    input.budget_month && /^\d{4}-\d{2}$/.test(input.budget_month) ? input.budget_month : null;
 
   await db
     .prepare(
       `INSERT INTO transactions (
         id, type, amount, currency, account_id, to_account_id, category_id,
         description, occurred_at, source, raw_input, telegram_message_id,
-        installments_total, first_installment_month, statement_month, third_party_name, linked_group_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        installments_total, first_installment_month, statement_month, budget_month, third_party_name, linked_group_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -983,6 +1172,7 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
       installmentsTotal,
       firstInstallmentMonth,
       input.statement_month ?? null,
+      budgetMonth,
       input.third_party_name ?? null,
       input.linked_group_id ?? null,
       createdAt
@@ -1072,6 +1262,7 @@ export async function updateTransaction(
       | 'installments_total'
       | 'first_installment_month'
       | 'statement_month'
+      | 'budget_month'
       | 'third_party_name'
       | 'tags'
     >
@@ -1106,6 +1297,12 @@ export async function updateTransaction(
       : existing.first_installment_month;
   const nextStatementMonth =
     patch.statement_month !== undefined ? patch.statement_month : existing.statement_month;
+  const nextBudgetMonth =
+    patch.budget_month !== undefined
+      ? patch.budget_month && /^\d{4}-\d{2}$/.test(patch.budget_month)
+        ? patch.budget_month
+        : null
+      : existing.budget_month;
   const nextThirdPartyName =
     patch.third_party_name !== undefined ? patch.third_party_name : existing.third_party_name;
 
@@ -1114,7 +1311,7 @@ export async function updateTransaction(
       `UPDATE transactions
        SET type = ?, amount = ?, currency = ?, account_id = ?, to_account_id = ?,
            category_id = ?, description = ?, occurred_at = ?,
-           installments_total = ?, first_installment_month = ?, statement_month = ?, third_party_name = ?
+           installments_total = ?, first_installment_month = ?, statement_month = ?, budget_month = ?, third_party_name = ?
        WHERE id = ?`
     )
     .bind(
@@ -1129,6 +1326,7 @@ export async function updateTransaction(
       nextInstallmentsTotal,
       nextFirstInstallmentMonth,
       nextStatementMonth,
+      nextBudgetMonth,
       nextThirdPartyName,
       id
     )
@@ -1166,11 +1364,11 @@ export async function listTransactions(
   const bindings: unknown[] = [];
 
   if (filters.from && filters.to) {
-    conditions.push('t.occurred_at >= ? AND t.occurred_at <= ?');
+    conditions.push("COALESCE(t.budget_month || '-01', t.occurred_at) >= ? AND COALESCE(t.budget_month || '-01', t.occurred_at) <= ?");
     bindings.push(filters.from, filters.to);
   } else if (filters.month) {
     const { start, end } = getMonthDateRange(filters.month);
-    conditions.push('t.occurred_at >= ? AND t.occurred_at <= ?');
+    conditions.push("COALESCE(t.budget_month || '-01', t.occurred_at) >= ? AND COALESCE(t.budget_month || '-01', t.occurred_at) <= ?");
     bindings.push(start, end);
   }
   if (filters.accountId) {
@@ -1211,31 +1409,35 @@ export async function getPeriodSummary(
     to: string;
     basis?: AccountingBasis;
     statementMonth?: string;
+    today?: string;
   }
 ): Promise<MonthSummary> {
-  const { accounts, categories, tags, transactions } = await loadAllDataForAnalysis(db);
+  const { accounts, categories, tags, transactions, recurringItems } = await loadAllDataForAnalysis(db);
   return computePeriodMetrics(accounts, transactions, categories, tags, {
     from: options.from,
     to: options.to,
     basis: options.basis ?? 'cash',
     statementMonth: options.statementMonth,
+    recurringItems,
+    today: options.today,
   });
 }
 
 export async function getMonthSummary(
   db: D1Database,
   month: string,
-  basis: AccountingBasis = 'cash'
+  basis: AccountingBasis = 'cash',
+  today?: string
 ): Promise<MonthSummary> {
   const { start, end } = getMonthDateRange(month);
-  return getPeriodSummary(db, { from: start, to: end, basis, statementMonth: month });
+  return getPeriodSummary(db, { from: start, to: end, basis, statementMonth: month, today });
 }
 
 export async function getMonthlyHistory(
   db: D1Database,
   options: { from: string; to: string; basis?: AccountingBasis }
 ): Promise<MonthlyHistoryPoint[]> {
-  const { accounts, categories, tags, transactions } = await loadAllDataForAnalysis(db);
+  const { accounts, categories, tags, transactions, recurringItems } = await loadAllDataForAnalysis(db);
   const basis = options.basis ?? 'cash';
 
   const fromYm = options.from.slice(0, 7);
@@ -1261,6 +1463,7 @@ export async function getMonthlyHistory(
       to: end,
       basis,
       statementMonth: m,
+      recurringItems,
     });
     return {
       month: m,
@@ -1282,8 +1485,8 @@ export async function createRecurringItem(db: D1Database, input: RecurringItemIn
   const createdAt = new Date().toISOString();
   await db
     .prepare(
-      `INSERT INTO recurring_items (id, name, type, amount, currency, account_id, category_id, day_of_month, active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO recurring_items (id, name, type, amount, currency, account_id, category_id, day_of_month, start_month, active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -1294,6 +1497,7 @@ export async function createRecurringItem(db: D1Database, input: RecurringItemIn
       input.account_id,
       input.category_id ?? null,
       input.day_of_month ?? null,
+      normalizeMonth(input.start_month),
       input.active ?? 1,
       createdAt
     )
@@ -1315,7 +1519,7 @@ export async function updateRecurringItem(
   await db
     .prepare(
       `UPDATE recurring_items
-       SET name = ?, type = ?, amount = ?, currency = ?, account_id = ?, category_id = ?, day_of_month = ?, active = ?
+       SET name = ?, type = ?, amount = ?, currency = ?, account_id = ?, category_id = ?, day_of_month = ?, start_month = ?, active = ?
        WHERE id = ?`
     )
     .bind(
@@ -1326,6 +1530,7 @@ export async function updateRecurringItem(
       patch.account_id ?? existing.account_id,
       patch.category_id !== undefined ? patch.category_id : existing.category_id,
       patch.day_of_month !== undefined ? patch.day_of_month : existing.day_of_month,
+      patch.start_month !== undefined ? normalizeMonth(patch.start_month) : existing.start_month,
       patch.active !== undefined ? patch.active : existing.active,
       id
     )

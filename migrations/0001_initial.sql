@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   initial_balance REAL NOT NULL DEFAULT 0,
   color TEXT NOT NULL DEFAULT '#009EE3',
   is_default INTEGER NOT NULL DEFAULT 0,
+  due_day INTEGER CHECK(due_day IS NULL OR (due_day >= 1 AND due_day <= 31)),
   created_at TEXT NOT NULL
 );
 
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   installments_total INTEGER CHECK(installments_total IS NULL OR installments_total >= 1),
   first_installment_month TEXT,
   statement_month TEXT,
+  budget_month TEXT,
   third_party_name TEXT,
   linked_group_id TEXT,
   created_at TEXT NOT NULL
@@ -53,6 +55,9 @@ CREATE INDEX IF NOT EXISTS idx_transactions_installments
 CREATE INDEX IF NOT EXISTS idx_transactions_statement_month
   ON transactions(statement_month)
   WHERE statement_month IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_budget_month
+  ON transactions(budget_month)
+  WHERE budget_month IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tags (
   id TEXT PRIMARY KEY,
@@ -77,18 +82,20 @@ CREATE TABLE IF NOT EXISTS recurring_items (
   account_id TEXT NOT NULL REFERENCES accounts(id),
   category_id TEXT REFERENCES categories(id),
   day_of_month INTEGER CHECK(day_of_month IS NULL OR (day_of_month >= 1 AND day_of_month <= 31)),
+  start_month TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
 
--- Generic editable base categories (17 expense + 4 income)
+-- Generic editable base categories (18 expense + 4 income)
 INSERT OR IGNORE INTO categories (id, name, icon, type, color) VALUES
   ('supermercado', 'Supermercado', '🛒', 'expense', '#FF9800'),
   ('servicios', 'Servicios', '💡', 'expense', '#FB8C00'),
   ('mascotas', 'Mascotas', '🐾', 'expense', '#FFA726'),
-  ('comida_afuera', 'Comida afuera / Delivery', '🍔', 'expense', '#F44336'),
-  ('kiosco_cafe', 'Kiosco / Café / Snacks', '🍫', 'expense', '#FF7043'),
-  ('compras_ropa', 'Compras y Ropa', '🛍️', 'expense', '#29B6F6'),
+  ('delivery', 'Delivery', '🍔', 'expense', '#F44336'),
+  ('kiosco', 'Kiosco', '🍫', 'expense', '#FF7043'),
+  ('compras', 'Compras', '🛍️', 'expense', '#29B6F6'),
+  ('ropa', 'Ropa', '👕', 'expense', '#00ACC1'),
   ('regalos', 'Regalos', '🎁', 'expense', '#4FC3F7'),
   ('cuidado_personal', 'Cuidado personal', '💇', 'expense', '#03A9F4'),
   ('transporte_publico', 'Transporte público', '🚌', 'expense', '#78909C'),

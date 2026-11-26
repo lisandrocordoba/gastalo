@@ -106,7 +106,13 @@ app.get('/api/bootstrap', async (c) => {
     await Promise.all([
       listCategories(c.env.DB),
       listTags(c.env.DB),
-      getPeriodSummary(c.env.DB, { from, to, basis, statementMonth }),
+      getPeriodSummary(c.env.DB, {
+        from,
+        to,
+        basis,
+        statementMonth,
+        today: todayInTimezone(tz),
+      }),
       getMonthlyHistory(c.env.DB, { from, to, basis }),
       listTransactions(c.env.DB, { from, to, limit: 2500 }),
       listRecurringItems(c.env.DB),
@@ -128,6 +134,7 @@ app.get('/api/bootstrap', async (c) => {
     recurringItems,
     projection,
     cardStatements: summary.card_statements,
+    overdueStatements: summary.overdue_card_alerts,
   });
 });
 
@@ -174,6 +181,7 @@ app.post('/api/transactions', async (c) => {
     installments_total: body.installments_total ?? null,
     first_installment_month: body.first_installment_month ?? null,
     statement_month: body.statement_month ?? null,
+    budget_month: body.budget_month ?? null,
     third_party_name: body.third_party_name ?? null,
     linked_group_id: body.linked_group_id ?? null,
     tags: Array.isArray(body.tags) ? body.tags : undefined,
@@ -242,6 +250,13 @@ app.post('/api/accounts', async (c) => {
   if (!body.name || !body.name.trim() || !body.type) {
     return c.json({ error: 'Nombre y tipo de cuenta son obligatorios' }, 400);
   }
+  if (
+    body.due_day !== undefined &&
+    body.due_day !== null &&
+    (!Number.isInteger(body.due_day) || body.due_day < 1 || body.due_day > 31)
+  ) {
+    return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
+  }
   try {
     const account = await createAccount(c.env.DB, {
       id: body.id,
@@ -251,6 +266,7 @@ app.post('/api/accounts', async (c) => {
       initial_balance: body.initial_balance,
       color: body.color,
       is_default: body.is_default,
+      due_day: body.due_day ?? null,
     });
     const accounts = await listAccountsWithBalances(c.env.DB);
     return c.json({ account, accounts }, 201);
@@ -267,6 +283,13 @@ app.patch('/api/accounts/:id', async (c) => {
     (typeof body.initial_balance !== 'number' || !Number.isFinite(body.initial_balance))
   ) {
     return c.json({ error: 'initial_balance debe ser numérico' }, 400);
+  }
+  if (
+    body.due_day !== undefined &&
+    body.due_day !== null &&
+    (!Number.isInteger(body.due_day) || body.due_day < 1 || body.due_day > 31)
+  ) {
+    return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
   }
   try {
     const updated = await updateAccount(c.env.DB, id, body);
@@ -457,14 +480,25 @@ app.post('/api/recurring', async (c) => {
   if (!body.name || !body.account_id || typeof body.amount !== 'number' || body.amount <= 0) {
     return c.json({ error: 'Datos inválidos' }, 400);
   }
+  const accounts = await listAccountsWithBalances(c.env.DB);
+  const acc = accounts.find((a) => a.id === body.account_id);
+  const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  const startMonth =
+    body.start_month === null
+      ? null
+      : typeof body.start_month === 'string' && /^\d{4}-\d{2}$/.test(body.start_month.trim())
+        ? body.start_month.trim()
+        : currentMonthInTimezone(tz);
+
   const item = await createRecurringItem(c.env.DB, {
     name: body.name,
     type: body.type === 'income' ? 'income' : 'expense',
     amount: body.amount,
-    currency: body.currency || c.env.DEFAULT_CURRENCY || 'ARS',
+    currency: body.currency || acc?.currency || c.env.DEFAULT_CURRENCY || 'ARS',
     account_id: body.account_id,
     category_id: body.category_id ?? null,
     day_of_month: body.day_of_month ?? null,
+    start_month: startMonth,
     active: body.active ?? 1,
   });
   return c.json({ recurringItem: item }, 201);
@@ -473,7 +507,15 @@ app.post('/api/recurring', async (c) => {
 app.patch('/api/recurring/:id', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json<Partial<RecurringItemInput>>();
-  const updated = await updateRecurringItem(c.env.DB, id, body);
+  const patch: Partial<RecurringItemInput> = { ...body };
+  if (patch.account_id && !patch.currency) {
+    const accounts = await listAccountsWithBalances(c.env.DB);
+    const targetAcc = accounts.find((a) => a.id === patch.account_id);
+    if (targetAcc) {
+      patch.currency = targetAcc.currency;
+    }
+  }
+  const updated = await updateRecurringItem(c.env.DB, id, patch);
   if (!updated) {
     return c.json({ error: 'Gasto fijo no encontrado' }, 404);
   }
@@ -535,6 +577,7 @@ app.get('/api/export.csv', async (c) => {
     'Etiquetas',
     'Cuotas',
     'Mes Resumen',
+    'Mes Contable',
     'Tercero',
     'Origen',
   ];
@@ -550,6 +593,7 @@ app.get('/api/export.csv', async (c) => {
     tx.tags.join('|'),
     tx.installments_total ?? '',
     tx.statement_month ?? '',
+    tx.budget_month ?? '',
     tx.third_party_name ?? '',
     tx.source,
   ]);
