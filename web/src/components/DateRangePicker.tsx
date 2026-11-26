@@ -85,11 +85,10 @@ export function getYearRange(year: number): DateRangeValue {
 
 export function getAllTimeRange(): DateRangeValue {
   const now = new Date();
-  const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
   return {
     mode: 'years',
     from: '2000-01-01',
-    to: today,
+    to: `${now.getFullYear() + 1}-12-31`,
     label: 'Todo el histórico',
   };
 }
@@ -178,7 +177,7 @@ export function DateRangePicker({ value, onChange }: Props) {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-12 z-50 w-80 rounded-2xl border border-zinc-700/80 bg-zinc-900 p-3.5 shadow-2xl">
+        <div className="absolute right-0 top-12 z-50 w-[min(20rem,calc(100vw-2rem))] rounded-2xl border border-zinc-700/80 bg-zinc-900 p-3.5 shadow-2xl">
           <div className="grid grid-cols-4 gap-1 rounded-xl bg-zinc-950 p-1 text-[11px] font-medium">
             {([
               { id: 'custom', label: 'Rango' },

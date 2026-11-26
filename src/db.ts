@@ -17,6 +17,7 @@ import type {
   MonthSummary,
   MonthlyHistoryPoint,
   OverdueCardAlert,
+  PaidStatementItem,
   PayStatementInput,
   ProjectedInstallment,
   RecurringItem,
@@ -403,8 +404,11 @@ export function computePeriodMetrics(
   const { from, to, basis } = options;
   const statementMonth = options.statementMonth ?? to.slice(0, 7);
   const recurringItems = options.recurringItems ?? [];
-  const cardAccountIds = new Set(accounts.filter((a) => a.type === 'credit_card').map((a) => a.id));
+  const cardAccounts = accounts.filter((a) => a.type === 'credit_card');
+  const cardAccountMap = new Map(cardAccounts.map((a) => [a.id, a]));
+  const cardAccountIds = new Set(cardAccounts.map((a) => a.id));
   const statementCache = new Map<string, CardStatement[]>();
+  const paidStatementItems: PaidStatementItem[] = [];
 
   const getCardStatement = (cardId: string, month: string): CardStatement | undefined => {
     let list = statementCache.get(month);
@@ -482,6 +486,23 @@ export function computePeriodMetrics(
             for (const tagId of item.tags) {
               tagTotals.set(tagId, (tagTotals.get(tagId) ?? 0) + portion);
             }
+            paidStatementItems.push({
+              transaction_id: item.transaction_id,
+              payment_transaction_id: tx.id,
+              card_account_id: tx.to_account_id,
+              card_account_name: cardAccountMap.get(tx.to_account_id)?.name ?? tx.to_account_id,
+              statement_month: tx.statement_month,
+              paid_at: tx.occurred_at,
+              occurred_at: item.occurred_at,
+              description: item.description,
+              category_id: item.category_id,
+              tags: [...item.tags],
+              installment_number: item.installment_number,
+              installments_total: item.installments_total,
+              installment_amount: item.installment_amount,
+              prorated_amount: portion,
+              currency: tx.currency,
+            });
           }
 
           const extra = round2(availableForOwn - ownSum);
@@ -560,6 +581,7 @@ export function computePeriodMetrics(
     accounts: accountsWithBalances,
     card_statements: cardStatements,
     overdue_card_alerts: overdueCardAlerts,
+    paid_statement_items: paidStatementItems,
   };
 }
 
@@ -1245,6 +1267,27 @@ export async function getTransactionById(db: D1Database, id: string): Promise<Tr
   return hydrated[0] ?? null;
 }
 
+export async function getTransactionsByIds(db: D1Database, ids: string[]): Promise<Transaction[]> {
+  const uniqueIds = Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id.length > 0)));
+  if (uniqueIds.length === 0) return [];
+
+  const rows: RawTransactionRow[] = [];
+  const CHUNK_SIZE = 80;
+  for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+    const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const res = await db
+      .prepare(`SELECT * FROM transactions WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<RawTransactionRow>();
+    if (res.results) {
+      rows.push(...res.results);
+    }
+  }
+
+  return hydrateTransactionTags(db, rows);
+}
+
 export async function updateTransaction(
   db: D1Database,
   id: string,
@@ -1363,12 +1406,15 @@ export async function listTransactions(
   const conditions: string[] = [];
   const bindings: unknown[] = [];
 
+  const effectiveDateExpr =
+    "CASE WHEN t.budget_month GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' THEN t.budget_month || '-01' ELSE t.occurred_at END";
+
   if (filters.from && filters.to) {
-    conditions.push("COALESCE(t.budget_month || '-01', t.occurred_at) >= ? AND COALESCE(t.budget_month || '-01', t.occurred_at) <= ?");
+    conditions.push(`${effectiveDateExpr} >= ? AND ${effectiveDateExpr} <= ?`);
     bindings.push(filters.from, filters.to);
   } else if (filters.month) {
     const { start, end } = getMonthDateRange(filters.month);
-    conditions.push("COALESCE(t.budget_month || '-01', t.occurred_at) >= ? AND COALESCE(t.budget_month || '-01', t.occurred_at) <= ?");
+    conditions.push(`${effectiveDateExpr} >= ? AND ${effectiveDateExpr} <= ?`);
     bindings.push(start, end);
   }
   if (filters.accountId) {
@@ -1384,8 +1430,12 @@ export async function listTransactions(
     bindings.push(filters.type);
   }
   if (filters.tagId) {
-    conditions.push('EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = t.id AND tt.tag_id = ?)');
-    bindings.push(slugifyTag(filters.tagId));
+    const rawTag = filters.tagId.trim().replace(/^#/, '');
+    const slugTag = slugifyTag(filters.tagId);
+    conditions.push(
+      'EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = t.id AND (tt.tag_id = ? OR tt.tag_id = ?))'
+    );
+    bindings.push(rawTag, slugTag);
   }
   if (filters.search) {
     conditions.push('LOWER(t.description) LIKE ?');

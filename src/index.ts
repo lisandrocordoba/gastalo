@@ -16,6 +16,7 @@ import {
   getFutureProjection,
   getMonthlyHistory,
   getPeriodSummary,
+  getTransactionsByIds,
   listAccountsWithBalances,
   listCategories,
   listRecurringItems,
@@ -102,6 +103,7 @@ app.get('/api/bootstrap', async (c) => {
   const nextMonth = addMonths(currentMonth, 1);
 
   const defaultCurrency = c.env.DEFAULT_CURRENCY || 'ARS';
+  const today = todayInTimezone(tz);
   const [categories, tags, summary, monthlyHistory, transactions, recurringItems, projection] =
     await Promise.all([
       listCategories(c.env.DB),
@@ -111,7 +113,7 @@ app.get('/api/bootstrap', async (c) => {
         to,
         basis,
         statementMonth,
-        today: todayInTimezone(tz),
+        today,
       }),
       getMonthlyHistory(c.env.DB, { from, to, basis }),
       listTransactions(c.env.DB, { from, to, limit: 2500 }),
@@ -119,18 +121,31 @@ app.get('/api/bootstrap', async (c) => {
       getFutureProjection(c.env.DB, nextMonth, 3, defaultCurrency),
     ]);
 
+  const txIdSet = new Set(transactions.map((t) => t.id));
+  const referencedIds = Array.from(
+    new Set(
+      summary.paid_statement_items
+        .map((i) => i.transaction_id)
+        .filter((id) => !txIdSet.has(id))
+    )
+  );
+  const referencedTransactions = await getTransactionsByIds(c.env.DB, referencedIds);
+
   return c.json({
     month: from.slice(0, 7),
     from,
     to,
     basis,
     statementMonth,
+    today,
+    timezone: tz,
     accounts: summary.accounts,
     categories,
     tags,
     summary,
     monthlyHistory,
     transactions,
+    referencedTransactions,
     recurringItems,
     projection,
     cardStatements: summary.card_statements,

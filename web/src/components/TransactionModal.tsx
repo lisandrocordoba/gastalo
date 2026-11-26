@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import type { CreateSharedPurchasePayload, CreateTransactionPayload } from '../api';
 import type { AccountWithBalance, Category, Tag, Transaction, TransactionType } from '../types';
@@ -26,8 +26,17 @@ const MODAL_TYPES: { id: TransactionType; label: string }[] = [
 ];
 
 function nextMonthFromDate(dateStr: string): string {
-  const [y, m] = dateStr.slice(0, 7).split('-').map(Number);
-  const d = new Date(Date.UTC(y, m, 1));
+  const match = /^(\d{4})-(\d{2})/.exec(dateStr.trim());
+  if (match) {
+    const y = Number(match[1]);
+    const m = Number(match[2]);
+    if (Number.isInteger(y) && Number.isInteger(m) && m >= 1 && m <= 12) {
+      const d = new Date(Date.UTC(y, m, 1));
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
+  }
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
@@ -59,13 +68,25 @@ export function TransactionModal({
   const [thirdPartyName, setThirdPartyName] = useState('');
   const [isShared, setIsShared] = useState(false);
   const [sharedAmount, setSharedAmount] = useState('');
+  const [creatingTag, setCreatingTag] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const prevOpenRef = useRef(false);
+  const prevEditingIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    const currentEditingId = editing?.id ?? null;
+    const justOpened = open && !prevOpenRef.current;
+    const editingChangedWhileOpen =
+      open && prevOpenRef.current && currentEditingId !== prevEditingIdRef.current;
+    prevOpenRef.current = open;
+    prevEditingIdRef.current = currentEditingId;
+
+    if (!open || (!justOpened && !editingChangedWhileOpen)) return;
+
     setError('');
     setNewTagInput('');
+    setCreatingTag(false);
     const defAcc =
       accounts.find((a) => a.is_default === 1 && a.type !== 'credit_card') ??
       accounts.find((a) => a.type !== 'credit_card') ??
@@ -76,7 +97,6 @@ export function TransactionModal({
       accounts.find((a) => a.id !== defAccId) ??
       defAcc;
     const defExpenseCat = categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? '';
-    const defIncomeCat = categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? '';
 
     if (editing) {
       setType(editing.type);
@@ -84,13 +104,15 @@ export function TransactionModal({
       setCurrency(editing.currency);
       setAccountId(editing.account_id);
       setToAccountId(editing.to_account_id || defToAcc?.id || '');
-      setCategoryId(
-        editing.category_id || (editing.type === 'income' ? defIncomeCat : defExpenseCat)
-      );
+      setCategoryId(editing.category_id ?? '');
       setDescription(editing.description);
       setOccurredAt(editing.occurred_at);
       setSelectedTags(editing.tags ?? []);
-      setInstallments(editing.installments_total ? String(editing.installments_total) : '');
+      setInstallments(
+        editing.installments_total && editing.installments_total > 1
+          ? String(editing.installments_total)
+          : ''
+      );
       setFirstInstallmentMonth(editing.first_installment_month ?? '');
       setBudgetMonth(editing.budget_month ?? '');
       setThirdPartyName(editing.third_party_name ?? '');
@@ -134,12 +156,18 @@ export function TransactionModal({
 
   const handleAddTag = async () => {
     const clean = newTagInput.trim().replace(/^#/, '');
-    if (!clean) return;
-    const created = await onCreateTag(clean);
-    if (!selectedTags.includes(created.id)) {
-      setSelectedTags((prev) => [...prev, created.id]);
+    if (!clean || creatingTag) return;
+    setCreatingTag(true);
+    setError('');
+    try {
+      const created = await onCreateTag(clean);
+      setSelectedTags((prev) => (prev.includes(created.id) ? prev : [...prev, created.id]));
+      setNewTagInput('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo crear la etiqueta');
+    } finally {
+      setCreatingTag(false);
     }
-    setNewTagInput('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -151,6 +179,10 @@ export function TransactionModal({
     }
     if (!description.trim()) {
       setError('Ingresá una descripción.');
+      return;
+    }
+    if (isCreditCard && (type === 'transfer' || type === 'investment')) {
+      setError('No podés registrar transferencias ni inversiones desde una tarjeta de crédito.');
       return;
     }
     if (type === 'transfer' && accountId === toAccountId) {
@@ -181,7 +213,7 @@ export function TransactionModal({
         await onSubmitShared({
           account_id: accountId,
           currency,
-          category_id: categoryId,
+          category_id: categoryId || null,
           description: description.trim(),
           occurred_at: occurredAt,
           own_amount: Math.round((numAmount - thirdAmt) * 100) / 100,
@@ -213,7 +245,7 @@ export function TransactionModal({
         currency,
         account_id: accountId,
         to_account_id: type === 'transfer' ? toAccountId : null,
-        category_id: showCategory ? categoryId : null,
+        category_id: showCategory ? categoryId || null : null,
         description: description.trim(),
         occurred_at: occurredAt,
         tags: selectedTags,
@@ -257,33 +289,38 @@ export function TransactionModal({
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-zinc-950 p-1">
-              {MODAL_TYPES.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => {
-                    setType(t.id);
-                    if (t.id === 'income') {
-                      setCategoryId(
-                        categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? ''
-                      );
-                    }
-                    if (t.id === 'expense') {
-                      setCategoryId(
-                        categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? ''
-                      );
-                    }
-                    if (t.id !== 'expense') setIsShared(false);
-                  }}
-                  className={`rounded-lg py-1.5 text-xs font-medium transition ${
-                    type === t.id
-                      ? 'bg-zinc-800 text-white shadow'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
+              {MODAL_TYPES.map((t) => {
+                const disabledForCard =
+                  isCreditCard && (t.id === 'transfer' || t.id === 'investment');
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    disabled={disabledForCard}
+                    onClick={() => {
+                      setType(t.id);
+                      if (t.id === 'income') {
+                        setCategoryId(
+                          categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? ''
+                        );
+                      }
+                      if (t.id === 'expense') {
+                        setCategoryId(
+                          categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? ''
+                        );
+                      }
+                      if (t.id !== 'expense') setIsShared(false);
+                    }}
+                    className={`rounded-lg py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                      type === t.id
+                        ? 'bg-zinc-800 text-white shadow'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -343,7 +380,11 @@ export function TransactionModal({
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
               >
                 {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
+                  <option
+                    key={a.id}
+                    value={a.id}
+                    disabled={(type === 'transfer' || type === 'investment') && a.type === 'credit_card'}
+                  >
                     {a.name}
                   </option>
                 ))}
@@ -373,6 +414,7 @@ export function TransactionModal({
                   onChange={(e) => setCategoryId(e.target.value)}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 >
+                  <option value="">Sin categoría</option>
                   {filteredCategories.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.icon} {c.name}
@@ -533,11 +575,12 @@ export function TransactionModal({
               />
               <button
                 type="button"
+                disabled={creatingTag || !newTagInput.trim()}
                 onClick={() => void handleAddTag()}
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
               >
                 <Plus className="h-3 w-3" />
-                Agregar
+                {creatingTag ? 'Agregando...' : 'Agregar'}
               </button>
             </div>
           </div>
