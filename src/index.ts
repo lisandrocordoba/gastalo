@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { verifyDashboardAuth } from './auth';
+import { timingSafeEqual, verifyDashboardAuth } from './auth';
 import {
   ConflictError,
   NotFoundError,
@@ -136,11 +136,14 @@ app.get('/api/health', (c) => {
 
 app.post('/webhook/telegram', async (c) => {
   const expectedSecret = c.env.TELEGRAM_WEBHOOK_SECRET;
-  if (expectedSecret) {
-    const incomingSecret = c.req.header('X-Telegram-Bot-Api-Secret-Token');
-    if (incomingSecret !== expectedSecret) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
+  const incomingSecret = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+  if (
+    !expectedSecret ||
+    !expectedSecret.trim() ||
+    !incomingSecret ||
+    !(await timingSafeEqual(incomingSecret, expectedSecret))
+  ) {
+    return c.json({ error: 'Forbidden' }, 403);
   }
 
   let update: TelegramUpdate;

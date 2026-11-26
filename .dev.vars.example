@@ -1,6 +1,13 @@
+# Clave de Google AI Studio (Gemini)
 GEMINI_API_KEY=""
+
+# Token del bot de Telegram (@BotFather)
 TELEGRAM_BOT_TOKEN=""
+
+# Secretos OBLIGATORIOS en v3.1 (autenticación fail-closed; sin defaults inseguros)
 TELEGRAM_WEBHOOK_SECRET=""
 ALLOWED_TELEGRAM_USER_ID=""
 DASHBOARD_TOKEN="dev-token"
+
+# Entorno local ("development" o "production") · DEFAULT_CURRENCY soporta ARS, USD o BRL
 APP_ENV="development"

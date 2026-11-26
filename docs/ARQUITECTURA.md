@@ -23,12 +23,12 @@ flowchart LR
 ### ¿Qué pasa en cada flujo?
 1. **Cuando mandás un mensaje por Telegram:**
    - Telegram envía un POST a `https://<tu-worker>.workers.dev/webhook/telegram`.
-   - El Worker verifica el header secreto (`TELEGRAM_WEBHOOK_SECRET`) y tu ID de usuario (`ALLOWED_TELEGRAM_USER_ID`), responde `200 OK` al instante para que Telegram no reintente, y procesa el mensaje en segundo plano (`waitUntil`, con un tope de 30 segundos en Cloudflare).
+   - El Worker verifica de forma *fail-closed* el header secreto (`TELEGRAM_WEBHOOK_SECRET`, comparación en tiempo constante vía SHA-256) y tu ID de usuario + chat privado (`ALLOWED_TELEGRAM_USER_ID`, `from.id === allowedId` y `chat.id === allowedId`), deduplica reintentos por `telegram_message_id` (`idx_transactions_telegram_message_id`), responde `200 OK` al instante para que Telegram no reintente, y procesa el mensaje en segundo plano (`waitUntil`, con un tope de 30 segundos en Cloudflare).
    - Llama a **Gemini (`gemini-3.5-flash-lite`)** con esquema JSON estricto usando **las cuentas, categorías y etiquetas reales cargadas en tu base D1** para extraer movimientos (`record`), consultas (`query`) o altas de configuración (`manage`: crear cuentas, tarjetas, categorías o etiquetas).
    - Guarda en **D1** y te responde por Telegram con botones interactivos (`✅ OK`, `✏️ Categoría`, `🔄 Cuenta`, `🏷️ Etiquetas`, `🗑️ Borrar`).
 2. **Cuando abrís el Dashboard (PWA o Mini App):**
    - El mismo Worker sirve los archivos estáticos compilados de React (`web/dist`) sin pasar por Node ni gastar cómputo innecesario.
-   - Las llamadas a `/api/*` sí ejecutan el Worker, validan tu identidad (`DASHBOARD_TOKEN` o firma criptográfica HMAC de Telegram `initData`) y consultan **D1**.
+   - Las llamadas a `/api/*` ejecutan el Worker, validan tu identidad de forma *fail-closed* (`DASHBOARD_TOKEN` o firma criptográfica HMAC de Telegram `initData` con `auth_date` obligatorio) y consultan **D1**. En particular, `/api/bootstrap` lee todo el estado en un **snapshot único consistente** (`loadAllDataSnapshot`, 6 consultas en `db.batch`) para calcular saldos, resúmenes de tarjeta, `paid_statement_items`, `referencedTransactions`, historial y proyección futura.
 
 ---
 
@@ -41,20 +41,21 @@ flowchart LR
 
 ### B. Cloudflare D1 (`migrations/`)
 - Es una base de datos **SQLite administrada en la nube** (`wallet-db`).
+- Incluye [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) (esquema v3 limpio) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) (índices en `to_account_id`, `recurring_items(account_id)` y `telegram_message_id` para deduplicación de webhook).
 - Tenés **dos bases completamente aisladas**:
   1. **Local** (`.wrangler/state/v3/d1`): vive en tu PC; se usa al correr `npm run dev` y se actualiza con `npm run db:migrate:local`.
   2. **Remota / Producción** (en Cloudflare): vive en la nube; solo cambia si corrés `npm run db:migrate:remote` o si usás la app desplegada.
 - Nunca se borra ni se pisa código de producción por probar cosas en local.
 
 ### C. Workers Static Assets (`web/dist`)
-- Configurado en [wrangler.toml](../wrangler.toml) bajo `[assets]`.
+- Configurado en `wrangler.toml` (copiado de [wrangler.example.toml](../wrangler.example.toml)) bajo `[assets]`.
 - Permite alojar la app web React/Vite dentro del **mismo Worker y dominio**, evitando tener otro servicio separado para el frontend.
 - `run_worker_first = ["/api/*", "/webhook/*"]` garantiza que las rutas de API y webhook siempre pasen por tu lógica en TypeScript, mientras que el resto sirve el frontend.
 
 ### D. Configuración pública vs. Secretos
 | Dónde vive | Qué va ahí | ¿Se sube a Git? |
 | :--- | :--- | :---: |
-| `[vars]` en [wrangler.example.toml](../wrangler.example.toml) → `wrangler.toml` | Configuración **no sensible**: `APP_ENV`, `DEFAULT_CURRENCY`, `TIMEZONE`, `DASHBOARD_URL` y tu `database_id` de D1. | Plantilla sí; instancia personal local si usás fork propio |
+| `[vars]` en [wrangler.example.toml](../wrangler.example.toml) → `wrangler.toml` | Configuración **no sensible**: `APP_ENV`, `DEFAULT_CURRENCY` (`ARS`, `USD` o `BRL`), `TIMEZONE`, `DASHBOARD_URL` y tu `database_id` de D1. | Plantilla sí; `wrangler.toml` **Nunca** (en `.gitignore`) |
 | `.dev.vars` (copiado de [.dev.vars.example](../.dev.vars.example)) | Claves para **desarrollo local**: `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `TELEGRAM_WEBHOOK_SECRET`, `DASHBOARD_TOKEN`. | **Nunca** (en `.gitignore`) |
 | `npx wrangler secret put <NOMBRE>` | Claves cifradas en **producción** dentro de Cloudflare. | **Nunca** |
 
@@ -76,14 +77,14 @@ Mientras tu cuenta de Cloudflare **no tenga tarjeta de crédito asociada** y est
 
 ---
 
-## 4. Seguridad y Privacidad
+## 4. Seguridad y Privacidad (*Fail-Closed* en v3.1)
 
-1. **Bloqueo por usuario único:** En [src/telegram.ts](../src/telegram.ts), todo mensaje o botón cuyo `from.id` no coincida con `ALLOWED_TELEGRAM_USER_ID` se descarta silenciosamente.
-2. **Validación del Webhook:** En [src/index.ts](../src/index.ts), `POST /webhook/telegram` exige el header `X-Telegram-Bot-Api-Secret-Token` igual a `TELEGRAM_WEBHOOK_SECRET`.
-3. **Autenticación del Dashboard:** En [src/auth.ts](../src/auth.ts), toda ruta `/api/*` (excepto `/api/health`) exige:
-   - `Authorization: Bearer <DASHBOARD_TOKEN>` (comparado en tiempo constante), **o**
-   - `X-Telegram-Init-Data` verificado criptográficamente con HMAC-SHA256 usando `TELEGRAM_BOT_TOKEN`, expiración de 24h y validación de `user.id === ALLOWED_TELEGRAM_USER_ID`.
-4. **Datos personales fuera de Git:** La carpeta `imports/` (donde guardaremos tus CSV/exportaciones de Wallet para analizarlos) está ignorada en [.gitignore](../.gitignore). **Nunca** subas extractos bancarios ni `.dev.vars` a un repositorio remoto.
+1. **Bloqueo estricto por usuario y chat privado:** En [src/telegram.ts](../src/telegram.ts), `ALLOWED_TELEGRAM_USER_ID` es obligatorio; todo mensaje o callback donde falte la configuración, `from.id` no coincida o el mensaje no provenga del chat privado (`chat.id === allowedId`) se descarta silenciosamente.
+2. **Validación del Webhook y deduplicación:** En [src/index.ts](../src/index.ts), `POST /webhook/telegram` exige `TELEGRAM_WEBHOOK_SECRET` configurado y compara el header `X-Telegram-Bot-Api-Secret-Token` en tiempo constante vía SHA-256. Además, los reintentos de Telegram se deduplican mediante `telegram_message_id` (indexado en `idx_transactions_telegram_message_id` de [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql)).
+3. **Autenticación del Dashboard:** En [src/auth.ts](../src/auth.ts), toda ruta `/api/*` (excepto `/api/health`) aplica modo *fail-closed* y exige:
+   - `Authorization: Bearer <DASHBOARD_TOKEN>` (obligatorio incluso en desarrollo si no se presenta `initData`, comparado en tiempo constante vía SHA-256), **o**
+   - `X-Telegram-Init-Data` verificado criptográficamente con HMAC-SHA256 usando `TELEGRAM_BOT_TOKEN`, **`auth_date` obligatorio** (expiración <= 24h) y validación estricta de `user.id === ALLOWED_TELEGRAM_USER_ID`.
+4. **Configuración local y datos personales fuera de Git:** `wrangler.toml`, `.dev.vars`, `.wrangler/` y `imports/` están ignorados en [.gitignore](../.gitignore). **Nunca** subas `database_id` reales, extractos bancarios ni `.dev.vars` a un repositorio remoto.
 
 ---
 
@@ -99,11 +100,11 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 ### Ciclo obligatorio antes de pasar a producción
 1. **Desarrollar en local:**
    - Correr el entorno local (`npm run dev` + D1 local).
-   - Si hay cambios de esquema, crear una **nueva migración numerada** (`migrations/0002_...sql`, nunca editar `0001_initial.sql` ya aplicada en producción) y probarla primero con `npm run db:migrate:local`.
+   - Si hay cambios de esquema, crear una **nueva migración numerada** (`migrations/0003_...sql`, nunca editar `0001_initial.sql` ni `0002_indexes.sql` ya aplicadas) y probarla primero con `npm run db:migrate:local`.
 2. **Validar calidad antes de cerrar el cambio:**
    - `npm test` (todos los tests unitarios en verde).
    - `npm run build` (compilación de React + chequeo estricto de TypeScript sin errores).
-   - Revisar `git diff` y confirmar que no se filtran secretos ni datos reales.
+   - Revisar `git diff` y confirmar que no se filtran secretos, `wrangler.toml` ni datos reales.
 3. **Versionar (siempre con tu confirmación explícita):**
    - Commits claros y atómicos en la rama de trabajo.
    - Merge a `main` únicamente cuando la etapa está completa y probada.
@@ -113,11 +114,21 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 
 ---
 
-## 6. Modelo de Datos Agnóstico (v3)
+## 6. Modelo de Datos Agnóstico (v3.1)
 
-El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **22 categorías (18 de gasto + 4 de ingreso)** y **5 etiquetas**:
-- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en cualquier moneda, con color propio, flag `is_default` y vencimiento opcional `due_day` para tarjetas.
-- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
+El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **22 categorías (18 de gasto + 4 de ingreso)** y **5 etiquetas**:
+- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en `ARS`, `USD` o `BRL`, con color propio, flag `is_default` y vencimiento opcional `due_day` para tarjetas.
+- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total >= 2`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B, con estado `pending`/`partial`/`paid`), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
 - **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales / suscripciones con mes de inicio (`start_month`).
 
 Para el detalle completo de reglas contables, casos de uso y evolución, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md), [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) y [Roadmap y Próximos Pasos](ROADMAP.md).
+
+---
+
+## 7. Decisiones y Evolución de Invariantes (v3.1)
+
+1. **Monedas acotadas a `ARS`, `USD`, `BRL`:** la UI y docs previas mencionaban "otras monedas" mientras el motor contable/Gemini solo operaba en `ARS`/`USD`; en v3.1 se acota y valida `ARS`, `USD` y `BRL` de extremo a extremo.
+2. **Atribución de resúmenes pagados (`paid_statement_items`):** `/api/bootstrap` lee un snapshot único (`loadAllDataSnapshot`, 6 queries vía `db.batch`) y entrega `paid_statement_items` + `referencedTransactions` para que el listado filtrado coincida 100% con los gráficos bajo Opción B.
+3. **Pagos parciales y múltiples de resumen (`pending` / `partial` / `paid`):** reemplaza la suposición de "1 transferencia = resumen pagado" por acumulación cronológica por `(tarjeta, statement_month)` sin desactivar alertas vencidas ni duplicar el descuento de `third_party_total`.
+4. **Seguridad *fail-closed* por defecto:** `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID`, `DASHBOARD_TOKEN`, `auth_date` obligatorio en `initData` y chat privado (`chat.id === allowedId`) son obligatorios con comparación en tiempo constante vía SHA-256.
+5. **`wrangler.toml` excluido de Git:** resuelve la contradicción histórica con el repositorio trackeado y evita filtrar `database_id` o `DASHBOARD_URL` personales (ver detalle completo en [AGENTS.md](../AGENTS.md)).

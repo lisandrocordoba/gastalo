@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isAuthorizedRequest, verifyTelegramInitData } from '../src/auth';
+import { isAuthorizedRequest, timingSafeEqual, verifyTelegramInitData } from '../src/auth';
 import {
   computeAccountBalances,
   computeCardStatements,
@@ -88,9 +88,13 @@ describe('utils', () => {
     expect(previousMonths('2026-02', 4)).toEqual(['2025-11', '2025-12', '2026-01', '2026-02']);
   });
 
-  it('slugifyTag normalizes accents, hashtags, and spaces', () => {
+  it('slugifyTag normalizes accents, hashtags, spaces, and caps length at 32 chars', () => {
     expect(slugifyTag('#Hormiga')).toBe('hormiga');
     expect(slugifyTag('Vacaciones Año Nuevo')).toBe('vacaciones_ano_nuevo');
+    const longTag = slugifyTag('vacaciones_verano_brasil_florianopolis_2027');
+    expect(longTag.length).toBeLessThanOrEqual(32);
+    expect(longTag).toBe('vacaciones_verano_brasil_florian');
+    expect(slugifyTag('a'.repeat(31) + '_extra')).toBe('a'.repeat(31));
   });
 
   it('slugifyId and defaultColorForAccountType build agnostic account identifiers and colors', () => {
@@ -533,9 +537,112 @@ describe('agnostic gemini intent sanitization', () => {
       },
     ]);
   });
+
+  it('hardens currency alignment, BRL support, invalid transfers, calendar dates, non-card installments, and transcribed_query', () => {
+    const multiCurrencyAccounts = [
+      ...accounts,
+      { id: 'conta_brl', type: 'wallet' as const, currency: 'BRL', is_default: 0 },
+    ];
+
+    const out = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transcribed_query: '  ¿Cuánto gasté este mes?  ',
+        transactions: [
+          {
+            type: 'expense',
+            amount: 120,
+            currency: 'BRL',
+            account_id: 'galicia', // ARS wallet -> aligns to conta_brl
+            category_id: 'supermercado',
+            description: 'Mercado BRL',
+            occurred_at: '2026-02-31', // invalid calendar date -> fallback to today
+            tags: [],
+          },
+          {
+            type: 'expense',
+            amount: 5000,
+            currency: 'ARS',
+            account_id: 'galicia', // non-card -> installments stripped
+            category_id: 'compras',
+            description: 'Compra débito',
+            occurred_at: '2026-11-25',
+            installments_total: 3,
+            first_installment_month: '2026-13',
+            budget_month: '2026-00',
+            tags: [],
+          },
+          {
+            type: 'expense',
+            amount: 50,
+            currency: 'USD',
+            account_id: 'galicia', // USD card exists (visa_usd) -> aligns to visa_usd
+            category_id: 'otros',
+            description: 'Suscripción USD',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
+          {
+            type: 'transfer',
+            amount: 100,
+            currency: 'BRL',
+            account_id: 'conta_brl',
+            to_account_id: 'galicia', // cross-currency and no second BRL account -> dropped!
+            description: 'Transferencia inválida',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
+        ],
+      },
+      { accounts: multiCurrencyAccounts, categories, today: '2026-11-25' }
+    );
+
+    expect(out.transcribed_query).toBe('¿Cuánto gasté este mes?');
+    expect(out.transactions).toHaveLength(3);
+
+    expect(out.transactions[0].account_id).toBe('conta_brl');
+    expect(out.transactions[0].currency).toBe('BRL');
+    expect(out.transactions[0].occurred_at).toBe('2026-11-25');
+
+    expect(out.transactions[1].installments_total).toBeNull();
+    expect(out.transactions[1].first_installment_month).toBeNull();
+    expect(out.transactions[1].budget_month).toBeNull();
+
+    expect(out.transactions[2].account_id).toBe('visa_usd');
+    expect(out.transactions[2].currency).toBe('USD');
+
+    // When no account exists in requested currency, currency aligns to chosenAcc.currency
+    const noBrlOut = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'expense',
+            amount: 80,
+            currency: 'BRL',
+            account_id: 'galicia',
+            description: 'Sin cuenta BRL',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
+        ],
+      },
+      { accounts, categories, today: '2026-11-25' }
+    );
+    expect(noBrlOut.transactions[0].account_id).toBe('galicia');
+    expect(noBrlOut.transactions[0].currency).toBe('ARS');
+  });
 });
 
 describe('auth verification', () => {
+  it('timingSafeEqual compares strings in constant time regardless of length', async () => {
+    expect(await timingSafeEqual('secret-123', 'secret-123')).toBe(true);
+    expect(await timingSafeEqual('secret-123', 'secret-124')).toBe(false);
+    expect(await timingSafeEqual('secret-123', 'short')).toBe(false);
+    expect(await timingSafeEqual('', '')).toBe(true);
+    expect(await timingSafeEqual('', 'a')).toBe(false);
+  });
+
   it('accepts valid Bearer token and rejects wrong token', async () => {
     const env = {
       APP_ENV: 'production',
@@ -546,20 +653,20 @@ describe('auth verification', () => {
 
     const ok = await isAuthorizedRequest(new Headers({ Authorization: 'Bearer secret-123' }), env);
     const bad = await isAuthorizedRequest(new Headers({ Authorization: 'Bearer wrong' }), env);
+    const diffLen = await isAuthorizedRequest(new Headers({ Authorization: 'Bearer s' }), env);
     expect(ok).toBe(true);
     expect(bad).toBe(false);
+    expect(diffLen).toBe(false);
   });
 
-  it('verifies valid Telegram WebApp initData HMAC-SHA256', async () => {
-    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
-    const authDate = String(Math.floor(Date.now() / 1000));
-    const userJson = JSON.stringify({ id: 998877, first_name: 'Lisandro' });
-
+  async function signTelegramInitData(
+    fields: Record<string, string>,
+    botToken: string
+  ): Promise<string> {
     const params = new URLSearchParams();
-    params.set('auth_date', authDate);
-    params.set('query_id', 'AAHdF6IQAAAAAN0XohDhrOrc');
-    params.set('user', userJson);
-
+    for (const [k, v] of Object.entries(fields)) {
+      params.set(k, v);
+    }
     const pairs: string[] = [];
     params.forEach((v, k) => pairs.push(`${k}=${v}`));
     pairs.sort();
@@ -586,9 +693,57 @@ describe('auth verification', () => {
       .join('');
 
     params.set('hash', hash);
+    return params.toString();
+  }
 
-    expect(await verifyTelegramInitData(params.toString(), botToken, '998877')).toBe(true);
-    expect(await verifyTelegramInitData(params.toString(), botToken, '111111')).toBe(false);
+  it('verifies valid Telegram WebApp initData HMAC-SHA256 and enforces fail-closed auth_date & allowedUserId', async () => {
+    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
+    const nowSec = Math.floor(Date.now() / 1000);
+    const userJson = JSON.stringify({ id: 998877, first_name: 'Usuario' });
+
+    const validInitData = await signTelegramInitData(
+      {
+        auth_date: String(nowSec),
+        query_id: 'AAHdF6IQAAAAAN0XohDhrOrc',
+        user: userJson,
+      },
+      botToken
+    );
+
+    expect(await verifyTelegramInitData(validInitData, botToken, '998877')).toBe(true);
+    expect(await verifyTelegramInitData(validInitData, botToken, '111111')).toBe(false);
+    expect(await verifyTelegramInitData(validInitData, botToken, undefined)).toBe(false);
+    expect(await verifyTelegramInitData(validInitData, botToken, '')).toBe(false);
+    expect(await verifyTelegramInitData(validInitData, botToken, '   ')).toBe(false);
+
+    const missingAuthDate = await signTelegramInitData(
+      {
+        query_id: 'AAHdF6IQAAAAAN0XohDhrOrc',
+        user: userJson,
+      },
+      botToken
+    );
+    expect(await verifyTelegramInitData(missingAuthDate, botToken, '998877')).toBe(false);
+
+    const expiredAuthDate = await signTelegramInitData(
+      {
+        auth_date: String(nowSec - 86401),
+        query_id: 'AAHdF6IQAAAAAN0XohDhrOrc',
+        user: userJson,
+      },
+      botToken
+    );
+    expect(await verifyTelegramInitData(expiredAuthDate, botToken, '998877')).toBe(false);
+
+    const futureAuthDate = await signTelegramInitData(
+      {
+        auth_date: String(nowSec + 301),
+        query_id: 'AAHdF6IQAAAAAN0XohDhrOrc',
+        user: userJson,
+      },
+      botToken
+    );
+    expect(await verifyTelegramInitData(futureAuthDate, botToken, '998877')).toBe(false);
   });
 });
 

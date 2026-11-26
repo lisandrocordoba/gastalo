@@ -194,6 +194,7 @@ export type ManageOperation =
 export interface ParsedIntent {
   intent: 'record' | 'query' | 'manage' | 'unknown';
   reply_text?: string;
+  transcribed_query?: string | null;
   transactions: ParsedTransactionDraft[];
   operations: ManageOperation[];
 }

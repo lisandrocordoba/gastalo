@@ -141,7 +141,7 @@ export function previousMonths(endMonth: string, count: number): string[] {
   return result;
 }
 
-export function slugifyTag(name: string): string {
+export function slugifyTag(name: string, maxLen = 32): string {
   return name
     .trim()
     .replace(/^#/, '')
@@ -149,5 +149,7 @@ export function slugifyTag(name: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+    .replace(/^_+|_+$/g, '')
+    .slice(0, maxLen)
+    .replace(/_+$/g, '');
 }

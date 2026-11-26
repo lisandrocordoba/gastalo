@@ -1,9 +1,9 @@
-# Especificación del Modelo de Datos v3 y Guía de Casos de Uso
+# Especificación del Modelo de Datos v3.1 y Guía de Casos de Uso
 
-> **Estado:** Modelo v3.0 agnóstico en producción (`main`).  
+> **Estado:** Modelo v3.1 agnóstico endurecido sobre v3.0 (`main`).  
 > **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) · [Roadmap y Próximos Pasos](ROADMAP.md).
 
-Este documento describe el modelo contable y de datos definido en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql), diseñado para funcionar de forma **agnóstica** con cualquier combinación de bancos, billeteras digitales, cuentas de ahorro, efectivo y tarjetas de crédito en múltiples monedas.
+Este documento describe el modelo contable y de datos definido en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql), diseñado para funcionar de forma **agnóstica** con cualquier combinación de bancos, billeteras digitales, cuentas de ahorro, efectivo y tarjetas de crédito en las monedas soportadas (`ARS`, `USD` y `BRL`).
 
 ---
 
@@ -31,8 +31,8 @@ Cada cuenta creada por el usuario tiene:
   - **`wallet`**: billetera digital o cuenta bancaria corriente/sueldo (puede marcarse con `is_default = 1`).
   - **`savings`**: cuenta de ahorro, reservas o fondo separado (usada para cobertura de cuotas y gastos fijos futuros).
   - **`cash`**: efectivo.
-  - **`credit_card`**: tarjeta de crédito (moneda `ARS`, `USD`, `EUR`, etc.; saldo acumulado negativo hasta pagar el resumen; nunca se marca `is_default = 1`).
-- `currency`: código de moneda (`ARS`, `USD`, `EUR`, `BRL`, `CLP`, `UYU`, `MXN`, etc.).
+  - **`credit_card`**: tarjeta de crédito (moneda `ARS`, `USD` o `BRL`; saldo acumulado negativo hasta pagar el resumen; nunca se marca `is_default = 1`).
+- `currency`: código de moneda estrictamente acotado a `ARS` (`$`), `USD` (`US$`) o `BRL` (`R$`), validado en API, motor contable, Gemini y UI.
 - `initial_balance`: saldo inicial configurable.
 - `color`: color hexadecimal personalizable para distinguir cuentas en tarjetas y badges de movimientos.
 - `due_day`: *(opcional, `1–31`, solo para `credit_card`)* día de vencimiento del resumen mensual para mostrar alertas cuando un resumen pendiente está vencido.
@@ -102,6 +102,20 @@ Cada cuenta creada por el usuario tiene:
 | `third_party_repayment` | `+ amount` | — | `0` | `0` | `0` | `0` | `- amount` |
 | `adjustment` | `± amount` | — | `0` | `0` | `0` | `0` | `0` |
 
+### Reglas Contables e Índices Endurecidos (v3.1)
+
+1. **Pagos parciales y múltiples de resumen (`status: 'pending' | 'partial' | 'paid'`):**
+   - Varias transferencias hacia la misma `(credit_card, statement_month)` se agregan cronológicamente (`occurred_at`, `created_at`, `id`).
+   - Cada pago absorbe primero el saldo pendiente ajeno (`third_party_total`) y luego prorratea el excedente sobre la porción propia (`own_total`), evitando descontar dos veces gastos de terceros o apagar alertas `is_overdue` antes de cancelar `total_due` (`remaining_due`).
+2. **Atribución en filtros (`paid_statement_items` y `referencedTransactions`):**
+   - Al pagar un resumen en el período actual, `/api/bootstrap` calcula `paid_statement_items` (ítems propios prorrateados efectivamente cubiertos) y adjunta `referencedTransactions` (las compras originales de meses previos o cuotas que no caen en el rango calendario del período) para que filtrar `TransactionList` por categoría o etiqueta coincida exactamente con los gráficos.
+3. **Normalización de cuotas (`installments_total >= 2`):**
+   - Solo se consideran compras en cuotas cuando `installments_total >= 2` (`expense` o `third_party`). Valores `< 2` o `1` se normalizan a `null` junto con `first_installment_month = null`, evitando tratar pagos en 1 cuota como planes de cuotas en resúmenes o proyecciones.
+4. **Índices D1 adicionales ([`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql)):**
+   - `idx_transactions_to_account_id`: acelera consultas y validación de integridad referencial sobre cuentas destino (`transfer`).
+   - `idx_recurring_items_account_id`: acelera el chequeo de referencias al editar/eliminar cuentas.
+   - `idx_transactions_telegram_message_id`: índice parcial para deduplicar reintentos del webhook de Telegram sin escanear toda la tabla.
+
 ---
 
 ## 5. Casos de Uso Representativos
@@ -120,3 +134,18 @@ Comprás un regalo de **\$44.000** en **3 cuotas** con tu tarjeta de crédito a 
 
 ### Caso 3: Conciliación rápida de saldo (`⚖️`)
 Si tu saldo real en una cuenta difiere por unos pesos, tocás `⚖️` sobre la tarjeta de la cuenta, ingresás el saldo real y el sistema genera automáticamente un `adjustment` por la diferencia exacta sin distorsionar gráficos ni balances mensuales.
+
+---
+
+## 6. Decisiones y Evolución de Invariantes (v3.1)
+
+1. **Monedas acotadas estrictamente a `ARS`, `USD`, `BRL` (`$`, `US$`, `R$`):**
+   - *Por qué:* docs previos y `AccountModal` mencionaban "otras monedas" (`EUR`, `CLP`, `UYU`, `MXN`) mientras el motor contable y Gemini solo procesaban `ARS` y `USD`, descartando silenciosamente el resto o mezclando monedas en saldos. Se acota explícitamente a `ARS`/`USD`/`BRL` con validación en API, DB, Gemini y UI para garantizar integridad contable real.
+2. **Atribución de resúmenes pagados en `TransactionList` (`paid_statement_items`):**
+   - *Por qué:* mantiene intacta la contabilidad `cash` (Opción B: el consumo entra al pagar el resumen), pero incorpora `paid_statement_items` y `referencedTransactions` en `/api/bootstrap` para que filtrar por categoría o etiqueta muestre los ítems de meses previos/cuotas pagados en el período y coincida 100% con los gráficos (resolviendo el bug de `Movimientos (0)`).
+3. **Pagos parciales y múltiples de resumen (`pending` / `partial` / `paid`):**
+   - *Por qué:* reemplaza la suposición previa de "1 transferencia = resumen pagado" por agregación cronológica acumulada por `(tarjeta, statement_month)`, evitando que un pago parcial borre alertas vencidas o descuente dos veces `third_party_total`.
+4. **Seguridad *fail-closed* por defecto:**
+   - *Por qué:* `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID`, `DASHBOARD_TOKEN`, `auth_date` obligatorio en Mini App `initData` y chats privados (`chat.id === allowedId`) pasan a ser obligatorios con comparación en tiempo constante vía SHA-256, impidiendo exposición accidental por variables faltantes.
+5. **`wrangler.toml` excluido de Git:**
+   - *Por qué:* resuelve la contradicción entre el `README.md` y el repositorio trackeado, blindando la Invariante #1 (sin `database_id` ni dominios personales en Git).

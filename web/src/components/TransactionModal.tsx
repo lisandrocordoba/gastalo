@@ -560,7 +560,7 @@ export function TransactionModal({
                   type="text"
                   value={thirdPartyName}
                   onChange={(e) => setThirdPartyName(e.target.value)}
-                  placeholder="Ej: Ana / Juan"
+                  placeholder="Ej: Persona / Amigo"
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
