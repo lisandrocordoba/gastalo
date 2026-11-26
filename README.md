@@ -9,6 +9,7 @@ Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al le
 - **Cuotas, suscripciones, compartidos y proyección futura:** control de compras en cuotas, suscripciones asociadas a tarjetas o cuentas líquidas con mes de inicio (`start_month`) desde un único modal (`⚙️ Configurar` → *Fijos / Suscr.* o sección Tarjetas/Proyección), proyección ARS + USD a 3 meses vs. tus cuentas de reservas, división de gastos con terceros, filtro interactivo y mes contable opcional (`budget_month`).
 - **Dashboard Web (PWA + Telegram Mini App):** gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
 
+> 🤖 **Guía para agentes y mantenimiento:** [AGENTS.md](AGENTS.md)  
 > 📘 **Arquitectura e infraestructura:** [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md)  
 > 📐 **Modelo contable y casos de uso:** [docs/MODELO_DATOS.md](docs/MODELO_DATOS.md)  
 > 🧭 **Plan v3 agnóstico:** [docs/PLAN_V3_AGNOSTICO.md](docs/PLAN_V3_AGNOSTICO.md)  
