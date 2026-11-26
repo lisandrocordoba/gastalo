@@ -40,10 +40,11 @@ export function getTelegramInitData(): string {
   return window.Telegram?.WebApp?.initData ?? '';
 }
 
-function buildHeaders(): HeadersInit {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+function buildHeaders(hasBody = false): HeadersInit {
+  const headers: Record<string, string> = {};
+  if (hasBody) {
+    headers['Content-Type'] = 'application/json';
+  }
   const initData = getTelegramInitData();
   if (initData) {
     headers['X-Telegram-Init-Data'] = initData;
@@ -62,10 +63,11 @@ export class UnauthorizedError extends Error {
 }
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const hasBody = options?.body !== undefined;
   const res = await fetch(url, {
     ...options,
     headers: {
-      ...buildHeaders(),
+      ...buildHeaders(hasBody),
       ...(options?.headers ?? {}),
     },
   });
@@ -79,19 +81,24 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function fetchBootstrap(params: {
-  from: string;
-  to: string;
-  basis: AccountingBasis;
-  statementMonth: string;
-}): Promise<BootstrapResponse> {
+export function fetchBootstrap(
+  params: {
+    from: string;
+    to: string;
+    basis: AccountingBasis;
+    statementMonth: string;
+  },
+  options?: { signal?: AbortSignal }
+): Promise<BootstrapResponse> {
   const qs = new URLSearchParams({
     from: params.from,
     to: params.to,
     basis: params.basis,
     statementMonth: params.statementMonth,
   });
-  return apiFetch<BootstrapResponse>(`/api/bootstrap?${qs.toString()}`);
+  return apiFetch<BootstrapResponse>(`/api/bootstrap?${qs.toString()}`, {
+    signal: options?.signal,
+  });
 }
 
 export interface CreateTransactionPayload {
@@ -329,7 +336,7 @@ export function deleteRecurringItem(id: string): Promise<{ ok: boolean }> {
 export async function downloadCsv(from: string, to: string): Promise<void> {
   const qs = new URLSearchParams({ from, to });
   const res = await fetch(`/api/export.csv?${qs.toString()}`, {
-    headers: buildHeaders(),
+    headers: buildHeaders(false),
   });
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('No se pudo exportar el CSV');
@@ -341,16 +348,7 @@ export async function downloadCsv(from: string, to: string): Promise<void> {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function formatMoney(amount: number, currency = 'ARS'): string {
-  const abs = Math.abs(amount);
-  const formatted = new Intl.NumberFormat('es-AR', {
-    minimumFractionDigits: Number.isInteger(abs) ? 0 : 2,
-    maximumFractionDigits: 2,
-  }).format(abs);
-  const prefix = currency.toUpperCase() === 'USD' ? 'US$' : '$';
-  const sign = amount < 0 ? '-' : '';
-  return `${sign}${prefix} ${formatted}`;
-}
+export { formatMoney } from './utils/format';

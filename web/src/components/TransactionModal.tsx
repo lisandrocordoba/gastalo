@@ -1,7 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import type { CreateSharedPurchasePayload, CreateTransactionPayload } from '../api';
-import type { AccountWithBalance, Category, Tag, Transaction, TransactionType } from '../types';
+import {
+  SUPPORTED_CURRENCIES,
+  type AccountWithBalance,
+  type Category,
+  type SupportedCurrency,
+  type Tag,
+  type Transaction,
+  type TransactionType,
+} from '../types';
 
 interface Props {
   open: boolean;
@@ -26,8 +34,17 @@ const MODAL_TYPES: { id: TransactionType; label: string }[] = [
 ];
 
 function nextMonthFromDate(dateStr: string): string {
-  const [y, m] = dateStr.slice(0, 7).split('-').map(Number);
-  const d = new Date(Date.UTC(y, m, 1));
+  const match = /^(\d{4})-(\d{2})/.exec(dateStr.trim());
+  if (match) {
+    const y = Number(match[1]);
+    const m = Number(match[2]);
+    if (Number.isInteger(y) && Number.isInteger(m) && m >= 1 && m <= 12) {
+      const d = new Date(Date.UTC(y, m, 1));
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
+  }
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
@@ -59,38 +76,64 @@ export function TransactionModal({
   const [thirdPartyName, setThirdPartyName] = useState('');
   const [isShared, setIsShared] = useState(false);
   const [sharedAmount, setSharedAmount] = useState('');
+  const [creatingTag, setCreatingTag] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const prevOpenRef = useRef(false);
+  const prevEditingIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    const currentEditingId = editing?.id ?? null;
+    const justOpened = open && !prevOpenRef.current;
+    const editingChangedWhileOpen =
+      open && prevOpenRef.current && currentEditingId !== prevEditingIdRef.current;
+    prevOpenRef.current = open;
+    prevEditingIdRef.current = currentEditingId;
+
+    if (!open || (!justOpened && !editingChangedWhileOpen)) return;
+
     setError('');
     setNewTagInput('');
+    setCreatingTag(false);
     const defAcc =
       accounts.find((a) => a.is_default === 1 && a.type !== 'credit_card') ??
       accounts.find((a) => a.type !== 'credit_card') ??
       accounts[0];
     const defAccId = defAcc?.id ?? '';
+    const defCurrency = defAcc?.currency ?? 'ARS';
     const defToAcc =
-      accounts.find((a) => a.type === 'savings' && a.id !== defAccId) ??
-      accounts.find((a) => a.id !== defAccId) ??
-      defAcc;
+      accounts.find(
+        (a) => a.type === 'savings' && a.id !== defAccId && a.currency === defCurrency
+      ) ?? accounts.find((a) => a.id !== defAccId && a.currency === defCurrency);
     const defExpenseCat = categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? '';
-    const defIncomeCat = categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? '';
 
     if (editing) {
+      const editAcc = accounts.find((a) => a.id === editing.account_id);
+      const editCurrency = editAcc?.currency ?? editing.currency;
+      const validEditTargets = accounts.filter(
+        (a) => a.id !== editing.account_id && a.currency === editCurrency
+      );
+      const preferredEditTo =
+        (editing.to_account_id && validEditTargets.some((a) => a.id === editing.to_account_id)
+          ? editing.to_account_id
+          : null) ??
+        validEditTargets.find((a) => a.type === 'savings')?.id ??
+        validEditTargets[0]?.id ??
+        '';
       setType(editing.type);
       setAmount(String(editing.amount));
-      setCurrency(editing.currency);
+      setCurrency(editCurrency);
       setAccountId(editing.account_id);
-      setToAccountId(editing.to_account_id || defToAcc?.id || '');
-      setCategoryId(
-        editing.category_id || (editing.type === 'income' ? defIncomeCat : defExpenseCat)
-      );
+      setToAccountId(preferredEditTo);
+      setCategoryId(editing.category_id ?? '');
       setDescription(editing.description);
       setOccurredAt(editing.occurred_at);
       setSelectedTags(editing.tags ?? []);
-      setInstallments(editing.installments_total ? String(editing.installments_total) : '');
+      setInstallments(
+        editing.installments_total && editing.installments_total > 1
+          ? String(editing.installments_total)
+          : ''
+      );
       setFirstInstallmentMonth(editing.first_installment_month ?? '');
       setBudgetMonth(editing.budget_month ?? '');
       setThirdPartyName(editing.third_party_name ?? '');
@@ -99,7 +142,7 @@ export function TransactionModal({
     } else {
       setType('expense');
       setAmount('');
-      setCurrency(defAcc?.currency ?? 'ARS');
+      setCurrency(defCurrency);
       setAccountId(defAccId);
       setToAccountId(defToAcc?.id ?? '');
       setCategoryId(defExpenseCat);
@@ -118,6 +161,10 @@ export function TransactionModal({
   if (!open) return null;
 
   const selectedAccount = accounts.find((a) => a.id === accountId);
+  const effectiveCurrency = selectedAccount?.currency ?? currency;
+  const transferTargets = accounts.filter(
+    (a) => a.id !== accountId && a.currency === effectiveCurrency
+  );
   const isCreditCard = selectedAccount?.type === 'credit_card';
   const showCategory = type === 'expense' || type === 'income';
   const showThirdPartyField =
@@ -134,12 +181,18 @@ export function TransactionModal({
 
   const handleAddTag = async () => {
     const clean = newTagInput.trim().replace(/^#/, '');
-    if (!clean) return;
-    const created = await onCreateTag(clean);
-    if (!selectedTags.includes(created.id)) {
-      setSelectedTags((prev) => [...prev, created.id]);
+    if (!clean || creatingTag) return;
+    setCreatingTag(true);
+    setError('');
+    try {
+      const created = await onCreateTag(clean);
+      setSelectedTags((prev) => (prev.includes(created.id) ? prev : [...prev, created.id]));
+      setNewTagInput('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo crear la etiqueta');
+    } finally {
+      setCreatingTag(false);
     }
-    setNewTagInput('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -153,9 +206,24 @@ export function TransactionModal({
       setError('Ingresá una descripción.');
       return;
     }
-    if (type === 'transfer' && accountId === toAccountId) {
-      setError('La cuenta origen y destino deben ser distintas.');
+    if (isCreditCard && (type === 'transfer' || type === 'investment')) {
+      setError('No podés registrar transferencias ni inversiones desde una tarjeta de crédito.');
       return;
+    }
+    if (type === 'transfer') {
+      if (transferTargets.length === 0 || !toAccountId) {
+        setError(`No hay otra cuenta en ${effectiveCurrency} disponible como destino.`);
+        return;
+      }
+      const targetAcc = accounts.find((a) => a.id === toAccountId);
+      if (!targetAcc || targetAcc.id === accountId) {
+        setError('La cuenta origen y destino deben ser distintas.');
+        return;
+      }
+      if (targetAcc.currency !== effectiveCurrency) {
+        setError('Las transferencias deben ser entre cuentas de la misma moneda.');
+        return;
+      }
     }
 
     const parsedInst = installments ? Math.trunc(Number(installments)) : null;
@@ -180,8 +248,8 @@ export function TransactionModal({
       try {
         await onSubmitShared({
           account_id: accountId,
-          currency,
-          category_id: categoryId,
+          currency: effectiveCurrency,
+          category_id: categoryId || null,
           description: description.trim(),
           occurred_at: occurredAt,
           own_amount: Math.round((numAmount - thirdAmt) * 100) / 100,
@@ -210,10 +278,10 @@ export function TransactionModal({
         id: editing?.id,
         type,
         amount: numAmount,
-        currency,
+        currency: effectiveCurrency,
         account_id: accountId,
         to_account_id: type === 'transfer' ? toAccountId : null,
-        category_id: showCategory ? categoryId : null,
+        category_id: showCategory ? categoryId || null : null,
         description: description.trim(),
         occurred_at: occurredAt,
         tags: selectedTags,
@@ -257,33 +325,48 @@ export function TransactionModal({
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-zinc-950 p-1">
-              {MODAL_TYPES.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => {
-                    setType(t.id);
-                    if (t.id === 'income') {
-                      setCategoryId(
-                        categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? ''
-                      );
-                    }
-                    if (t.id === 'expense') {
-                      setCategoryId(
-                        categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? ''
-                      );
-                    }
-                    if (t.id !== 'expense') setIsShared(false);
-                  }}
-                  className={`rounded-lg py-1.5 text-xs font-medium transition ${
-                    type === t.id
-                      ? 'bg-zinc-800 text-white shadow'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
+              {MODAL_TYPES.map((t) => {
+                const disabledForCard =
+                  isCreditCard && (t.id === 'transfer' || t.id === 'investment');
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    disabled={disabledForCard}
+                    onClick={() => {
+                      setType(t.id);
+                      if (t.id === 'income') {
+                        setCategoryId(
+                          categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? ''
+                        );
+                      }
+                      if (t.id === 'expense') {
+                        setCategoryId(
+                          categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? ''
+                        );
+                      }
+                      if (t.id === 'transfer') {
+                        const validTargets = accounts.filter(
+                          (a) => a.id !== accountId && a.currency === effectiveCurrency
+                        );
+                        if (!validTargets.some((a) => a.id === toAccountId)) {
+                          const preferredTarget =
+                            validTargets.find((a) => a.type === 'savings') ?? validTargets[0];
+                          setToAccountId(preferredTarget?.id ?? '');
+                        }
+                      }
+                      if (t.id !== 'expense') setIsShared(false);
+                    }}
+                    className={`rounded-lg py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                      type === t.id
+                        ? 'bg-zinc-800 text-white shadow'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -305,12 +388,19 @@ export function TransactionModal({
             <div>
               <label className="mb-1 block text-xs text-zinc-400">Moneda</label>
               <select
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                value={effectiveCurrency}
+                disabled
+                title="La moneda se sincroniza automáticamente con la cuenta seleccionada"
+                className="w-full cursor-not-allowed rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-sm text-zinc-300 opacity-80 outline-none"
               >
-                <option value="ARS">ARS</option>
-                <option value="USD">USD</option>
+                {SUPPORTED_CURRENCIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+                {!SUPPORTED_CURRENCIES.includes(effectiveCurrency as SupportedCurrency) && (
+                  <option value={effectiveCurrency}>{effectiveCurrency}</option>
+                )}
               </select>
             </div>
           </div>
@@ -338,12 +428,25 @@ export function TransactionModal({
                   const nextAccId = e.target.value;
                   setAccountId(nextAccId);
                   const nextAcc = accounts.find((a) => a.id === nextAccId);
-                  if (nextAcc) setCurrency(nextAcc.currency);
+                  const nextCurrency = nextAcc?.currency ?? 'ARS';
+                  setCurrency(nextCurrency);
+                  const validTargets = accounts.filter(
+                    (a) => a.id !== nextAccId && a.currency === nextCurrency
+                  );
+                  if (!validTargets.some((a) => a.id === toAccountId)) {
+                    const preferredTarget =
+                      validTargets.find((a) => a.type === 'savings') ?? validTargets[0];
+                    setToAccountId(preferredTarget?.id ?? '');
+                  }
                 }}
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
               >
                 {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
+                  <option
+                    key={a.id}
+                    value={a.id}
+                    disabled={(type === 'transfer' || type === 'investment') && a.type === 'credit_card'}
+                  >
                     {a.name}
                   </option>
                 ))}
@@ -353,17 +456,23 @@ export function TransactionModal({
             {type === 'transfer' ? (
               <div>
                 <label className="mb-1 block text-xs text-zinc-400">Cuenta destino</label>
-                <select
-                  value={toAccountId}
-                  onChange={(e) => setToAccountId(e.target.value)}
-                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
-                >
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
+                {transferTargets.length === 0 ? (
+                  <p className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    No hay otra cuenta en {effectiveCurrency} para transferir.
+                  </p>
+                ) : (
+                  <select
+                    value={toAccountId}
+                    onChange={(e) => setToAccountId(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  >
+                    {transferTargets.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             ) : showCategory ? (
               <div>
@@ -373,6 +482,7 @@ export function TransactionModal({
                   onChange={(e) => setCategoryId(e.target.value)}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 >
+                  <option value="">Sin categoría</option>
                   {filteredCategories.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.icon} {c.name}
@@ -450,7 +560,7 @@ export function TransactionModal({
                   type="text"
                   value={thirdPartyName}
                   onChange={(e) => setThirdPartyName(e.target.value)}
-                  placeholder="Ej: Ana / Juan"
+                  placeholder="Ej: Persona / Amigo"
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
@@ -533,11 +643,12 @@ export function TransactionModal({
               />
               <button
                 type="button"
+                disabled={creatingTag || !newTagInput.trim()}
                 onClick={() => void handleAddTag()}
-                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
               >
                 <Plus className="h-3 w-3" />
-                Agregar
+                {creatingTag ? 'Agregando...' : 'Agregar'}
               </button>
             </div>
           </div>
@@ -554,7 +665,7 @@ export function TransactionModal({
             </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || (type === 'transfer' && transferTargets.length === 0)}
               className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
             >
               {saving ? 'Guardando...' : 'Guardar'}

@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { CalendarClock, Pause, Pencil, Play, Plus, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { AccountWithBalance, FutureProjection, RecurringItem } from '../types';
+import { buildProjectionMonthMeta, buildProjectionTitle } from '../utils/dashboardViewModel';
 
 interface Props {
   projection: FutureProjection;
@@ -21,14 +23,38 @@ export function FutureProjectionCard({
   onToggleRecurring,
   onDeleteRecurring,
 }: Props) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState('');
+
+  const handleToggle = async (item: RecurringItem) => {
+    if (busyId) return;
+    setBusyId(item.id);
+    setActionError('');
+    try {
+      await onToggleRecurring(item.id, item.active === 1 ? 0 : 1);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'No se pudo actualizar el gasto fijo');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDelete = async (item: RecurringItem) => {
+    if (busyId) return;
+    setBusyId(item.id);
+    setActionError('');
+    try {
+      await onDeleteRecurring(item.id);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'No se pudo eliminar el gasto fijo');
+    } finally {
+      setBusyId(null);
+    }
+  };
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const firstMonth = projection.months[0];
   const covered = projection.next_month_coverage_delta >= 0;
-  const savingsAccounts = accounts.filter((a) => a.type === 'savings');
-  const projectionTitle =
-    savingsAccounts.length === 1
-      ? `Próximos meses vs. ${savingsAccounts[0].name}`
-      : 'Próximos meses vs. Reservas / Ahorros';
+  const projectionTitle = buildProjectionTitle(accounts);
 
   return (
     <div className="flex flex-col gap-4 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
@@ -67,11 +93,7 @@ export function FutureProjectionCard({
               {formatMoney(m.total_committed)}
             </p>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Cuotas: {formatMoney(m.installments_total_amount)} · Fijos:{' '}
-              {formatMoney(m.recurring_total_amount)}
-              {m.recurring_usd_total_amount > 0
-                ? ` · USD: ${formatMoney(m.recurring_usd_total_amount, 'USD')}`
-                : ''}
+              {buildProjectionMonthMeta(m)}
             </p>
           </div>
         ))}
@@ -116,6 +138,10 @@ export function FutureProjectionCard({
           </button>
         </div>
 
+        {actionError && (
+          <p className="mt-2 text-xs text-rose-400">{actionError}</p>
+        )}
+
         {recurringItems.length > 0 && (
           <div className="mt-2.5 divide-y divide-zinc-800/70">
             {recurringItems.map((item) => (
@@ -148,9 +174,10 @@ export function FutureProjectionCard({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void onToggleRecurring(item.id, item.active === 1 ? 0 : 1)}
+                    disabled={busyId === item.id}
+                    onClick={() => void handleToggle(item)}
                     title={item.active === 1 ? 'Pausar' : 'Activar'}
-                    className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                    className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50"
                   >
                     {item.active === 1 ? (
                       <Pause className="h-3 w-3" />
@@ -160,9 +187,10 @@ export function FutureProjectionCard({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void onDeleteRecurring(item.id)}
+                    disabled={busyId === item.id}
+                    onClick={() => void handleDelete(item)}
                     title="Eliminar"
-                    className="rounded-md p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
+                    className="rounded-md p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400 disabled:opacity-50"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>

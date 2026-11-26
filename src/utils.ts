@@ -1,4 +1,38 @@
-import type { AccountType } from './types';
+import { SUPPORTED_CURRENCIES, type AccountType, type SupportedCurrency } from './types';
+
+export function isSupportedCurrency(c: string): c is SupportedCurrency {
+  return (SUPPORTED_CURRENCIES as readonly string[]).includes(c);
+}
+
+export function normalizeCurrency(
+  c: string | null | undefined,
+  fallback?: SupportedCurrency
+): SupportedCurrency | null {
+  if (c === null || c === undefined) return fallback ?? null;
+  const trimmed = c.trim().toUpperCase();
+  if (!trimmed) return fallback ?? null;
+  return isSupportedCurrency(trimmed) ? trimmed : null;
+}
+
+export function isValidIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [yStr, mStr, dStr] = value.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+export function isValidYearMonth(value: string): boolean {
+  if (!/^\d{4}-\d{2}$/.test(value)) return false;
+  const [yStr, mStr] = value.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  return Number.isInteger(y) && Number.isInteger(m) && m >= 1 && m <= 12;
+}
 
 export function shortId(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
@@ -42,13 +76,16 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export function formatCurrency(amount: number, currency = 'ARS'): string {
-  const abs = Math.abs(amount);
+  const safe = Number.isFinite(amount) ? amount : 0;
+  const normalized = Math.abs(safe) < 0.005 ? 0 : safe;
+  const abs = Math.abs(normalized);
   const formatted = new Intl.NumberFormat('es-AR', {
     minimumFractionDigits: Number.isInteger(abs) ? 0 : 2,
     maximumFractionDigits: 2,
   }).format(abs);
-  const prefix = currency.toUpperCase() === 'USD' ? 'US$' : '$';
-  const sign = amount < 0 ? '-' : '';
+  const upper = (currency || 'ARS').toUpperCase();
+  const prefix = upper === 'USD' ? 'US$' : upper === 'BRL' ? 'R$' : '$';
+  const sign = normalized < 0 ? '-' : '';
   return `${sign}${prefix} ${formatted}`;
 }
 
@@ -104,7 +141,7 @@ export function previousMonths(endMonth: string, count: number): string[] {
   return result;
 }
 
-export function slugifyTag(name: string): string {
+export function slugifyTag(name: string, maxLen = 32): string {
   return name
     .trim()
     .replace(/^#/, '')
@@ -112,5 +149,7 @@ export function slugifyTag(name: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+    .replace(/^_+|_+$/g, '')
+    .slice(0, maxLen)
+    .replace(/_+$/g, '');
 }

@@ -17,8 +17,11 @@ database_name = "wallet-db"
 database_id = "<REEMPLAZAR_CON_TU_DATABASE_ID>"
 migrations_dir = "migrations"
 
+# Secretos OBLIGATORIOS en v3.1 (cargar con `npx wrangler secret put <NOMBRE>`):
+# GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET,
+# ALLOWED_TELEGRAM_USER_ID y DASHBOARD_TOKEN (autenticación fail-closed).
 [vars]
 APP_ENV = "production"
-DEFAULT_CURRENCY = "ARS"
+DEFAULT_CURRENCY = "ARS" # Monedas soportadas: ARS, USD o BRL
 TIMEZONE = "America/Argentina/Buenos_Aires"
 DASHBOARD_URL = "https://<tu-worker>.workers.dev"

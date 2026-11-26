@@ -1,6 +1,7 @@
 import { ArrowDownRight, ArrowUpRight, Coins, CreditCard, Scale } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { MonthSummary } from '../types';
+import { buildSummarySubtitles } from '../utils/dashboardViewModel';
 
 interface Props {
   summary: MonthSummary;
@@ -15,10 +16,7 @@ export function SummaryCards({
   cardPurchasesFilterActive,
   onToggleCardPurchasesFilter,
 }: Props) {
-  const cardPurchasesSubtitle =
-    summary.card_purchases_usd > 0
-      ? `+ ${formatMoney(summary.card_purchases_usd, 'USD')} · No resta liquidez`
-      : 'Financiado · no resta liquidez';
+  const { expenseSubtitle, cardPurchasesSubtitle } = buildSummarySubtitles(summary);
 
   return (
     <section>
@@ -55,9 +53,7 @@ export function SummaryCards({
             {formatMoney(summary.expense)}
           </p>
           <p className="mt-0.5 text-[11px] text-zinc-400 tabular-nums">
-            {summary.usd_expense > 0
-              ? `+ ${formatMoney(summary.usd_expense, 'USD')}`
-              : 'Cuentas líquidas y pagos TC'}
+            {expenseSubtitle}
           </p>
         </div>
 

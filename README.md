@@ -1,13 +1,13 @@
 # Gasti Personal (Telegram + Gemini + Cloudflare Workers/D1 + PWA)
 
-Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al levantarlo arranca limpio (sin cuentas predefinidas) para que configures tus propios bancos, billeteras, efectivo, cuentas de ahorro/reservas y tarjetas de crédito (ARS, USD u otras monedas) desde el **Dashboard Web** o conversacionalmente por **Telegram**.
+Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al levantarlo arranca limpio (sin cuentas predefinidas) para que configures tus propios bancos, billeteras, efectivo, cuentas de ahorro/reservas y tarjetas de crédito (**ARS, USD y BRL**) desde el **Dashboard Web** o conversacionalmente por **Telegram**.
 
 ### Características principales
 - **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito (con día de vencimiento `due_day`), categorías y etiquetas.
-- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`), pagar resúmenes de TC (`statement_month`), imputar ingresos al mes siguiente (`budget_month`), responder consultas (con resúmenes y vencimientos) o crear cuentas/categorías/etiquetas por chat (`/cuentas`).
-- **Tarjetas de crédito con flujo real (Opción B) y alertas de vencimiento:** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen (`💳 Pagar resumen` o por Telegram), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría. Si configurás el día de vencimiento en la TC, un banner fijo superior avisa cuando hay resúmenes vencidos sin pagar.
-- **Cuotas, suscripciones, compartidos y proyección futura:** control de compras en cuotas, suscripciones asociadas a tarjetas o cuentas líquidas con mes de inicio (`start_month`) desde un único modal (`⚙️ Configurar` → *Fijos / Suscr.* o sección Tarjetas/Proyección), proyección ARS + USD a 3 meses vs. tus cuentas de reservas, división de gastos con terceros, filtro interactivo y mes contable opcional (`budget_month`).
-- **Dashboard Web (PWA + Telegram Mini App):** gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
+- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), pagar resúmenes de TC (`statement_month`), imputar ingresos al mes siguiente (`budget_month`), responder consultas (con resúmenes y vencimientos) o crear cuentas/categorías/etiquetas por chat (`/cuentas`, `/config`, `/resumen`, `/mes`, `/ayuda`).
+- **Tarjetas de crédito con flujo real (Opción B), pagos parciales y alertas de vencimiento:** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen (`💳 Pagar resumen` o por Telegram, soportando pagos parciales o múltiples con estado `pending` / `partial` / `paid`), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría. Si configurás el día de vencimiento en la TC, un banner fijo superior avisa cuando hay resúmenes vencidos sin pagar.
+- **Cuotas, suscripciones, compartidos y proyección futura:** control de compras en cuotas (`>= 2`), suscripciones asociadas a tarjetas o cuentas líquidas con mes de inicio (`start_month`) desde un único modal (`⚙️ Configurar` → *Fijos / Suscr.* o sección Tarjetas/Proyección), proyección ARS + USD a 3 meses vs. tus cuentas de reservas, división de gastos con terceros, filtro interactivo con atribución de ítems pagados en resumen (`paid_statement_items`) y mes contable opcional (`budget_month`).
+- **Dashboard Web (PWA + Telegram Mini App):** carga consistente en snapshot único (`/api/bootstrap`), gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
 
 > 🤖 **Guía para agentes y mantenimiento:** [AGENTS.md](AGENTS.md)  
 > 📘 **Arquitectura e infraestructura:** [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md)  
@@ -43,12 +43,12 @@ Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al le
 npm install
 npm --prefix web install
 
-# Copiar configuración de Cloudflare y secretos locales
+# Copiar configuración de Cloudflare y secretos locales (ambos están en .gitignore)
 cp wrangler.example.toml wrangler.toml
 cp .dev.vars.example .dev.vars
-# Completar .dev.vars con tus claves
+# Completar .dev.vars con tus claves obligatorias (TELEGRAM_WEBHOOK_SECRET, ALLOWED_TELEGRAM_USER_ID, DASHBOARD_TOKEN, etc.)
 
-# Crear la base de datos local y aplicar el esquema limpio
+# Crear la base de datos local y aplicar las migraciones (0001_initial.sql + 0002_indexes.sql)
 npm run db:migrate:local
 
 # Ejecutar tests y verificar build
@@ -77,7 +77,7 @@ npm run dev
    ```bash
    npm run db:migrate:remote
    ```
-4. Cargá los secretos en Cloudflare:
+4. Cargá los secretos **obligatorios** en Cloudflare (en v3.1 la autenticación es *fail-closed* si falta cualquiera de estos secretos):
    ```bash
    npx wrangler secret put GEMINI_API_KEY
    npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -85,7 +85,7 @@ npm run dev
    npx wrangler secret put ALLOWED_TELEGRAM_USER_ID
    npx wrangler secret put DASHBOARD_TOKEN
    ```
-   *(Para `TELEGRAM_WEBHOOK_SECRET` y `DASHBOARD_TOKEN` podés usar cualquier string largo aleatorio).*
+   *(Para `TELEGRAM_WEBHOOK_SECRET` y `DASHBOARD_TOKEN` usá strings largos aleatorios; `wrangler.toml` queda solo en local y está excluido de Git en `.gitignore`).*
 5. Desplegá la app completa (frontend + worker):
    ```bash
    npm run deploy
@@ -109,4 +109,16 @@ npm run dev
    - **En cuotas con tarjeta:** `"Zapatillas 120k en 3 cuotas con Visa"`
    - **Compra compartida:** `"Regalo 44k en 3 cuotas con Visa, mitad de Ana"`
    - **Inversión / Transferencia:** `"Invertí 150k en ETF"` / `"Pasé 50k a Reservas"`
-   - **Consultas:** `"¿Cuánto gasté en #hormiga este mes?"`, `/cuentas`, `/resumen`, `/saldos`, `/futuro`, `/ultimos`.
+   - **Consultas:** `"¿Cuánto gasté en #hormiga este mes?"`, `/cuentas`, `/config`, `/resumen`, `/mes`, `/saldos`, `/futuro`, `/ultimos`, `/ayuda`.
+
+---
+
+## Decisiones y Evolución de Invariantes (v3.1)
+
+A partir de v3.0 se consolidaron cinco definiciones clave para asegurar consistencia contable, seguridad por defecto e higiene del repositorio (ver detalle completo en [AGENTS.md](AGENTS.md), [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) y [docs/MODELO_DATOS.md](docs/MODELO_DATOS.md)):
+
+1. **Monedas acotadas a `ARS`, `USD` y `BRL` (`$`, `US$`, `R$`):** se reemplazó la mención abierta a "otras monedas" por soporte explícito y validado de punta a punta en API, DB, Gemini y UI.
+2. **Atribución de resúmenes pagados en `TransactionList` (`paid_statement_items`):** `/api/bootstrap` incluye `paid_statement_items` y `referencedTransactions` para que filtrar por categoría o etiqueta muestre los ítems de meses previos/cuotas pagados en el período y coincida 100% con los gráficos bajo Opción B.
+3. **Pagos parciales y múltiples de resumen (`pending` / `partial` / `paid`):** los pagos hacia una tarjeta se acumulan cronológicamente por `(tarjeta, statement_month)` sin marcar el resumen como saldado antes de tiempo ni descontar dos veces la porción ajena.
+4. **Seguridad *fail-closed* por defecto:** `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID`, `DASHBOARD_TOKEN`, `auth_date` obligatorio en `initData` y validación de chat privado (`chat.id === allowedId`) son estrictamente obligatorios con comparación en tiempo constante vía SHA-256.
+5. **`wrangler.toml` fuera de Git:** `wrangler.toml` está en `.gitignore`; solo se versiona la plantilla pública `wrangler.example.toml`.

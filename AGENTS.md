@@ -1,6 +1,6 @@
 # AGENTS.md — Guía de Mantenimiento para Agentes (Gasti Personal)
 
-Este documento es el punto de entrada técnico para cualquier agente de desarrollo que mantenga o extienda **Gasti Personal** (aplicación de finanzas personales **v3.0**, 100% agnóstica y serverless sobre Cloudflare Workers + D1).
+Este documento es el punto de entrada técnico para cualquier agente de desarrollo que mantenga o extienda **Gasti Personal** (aplicación de finanzas personales **v3.1**, evolución endurecida sobre v3.0, 100% agnóstica y serverless sobre Cloudflare Workers + D1).
 
 ---
 
@@ -19,21 +19,22 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
 
 | Ruta | Responsabilidad |
 | :--- | :--- |
-| [`src/index.ts`](src/index.ts) | Entrypoint Hono: `/webhook/telegram`, `/api/bootstrap`, CRUD `/api/accounts`, `/api/categories`, `/api/tags`, `/api/recurring`, `/api/transactions`, `/api/cards/:id/pay-statement`, `/api/projection`, `/api/export.csv`, `/api/health`. |
-| [`src/db.ts`](src/db.ts) | Consultas D1 y funciones puras de negocio/contabilidad (`computeAccountBalances`, `computeCardStatements`, `computeOverdueCardAlerts`, `computePeriodMetrics`, `computeFutureProjection`, `payCardStatement`, `reconcileAccountBalance`, CRUD con `ConflictError` `409`). |
-| [`src/gemini.ts`](src/gemini.ts) | Esquema JSON estricto (`PARSE_SCHEMA`), sanitización (`sanitizeParsedIntent`), parser multimodal (`record` / `query` / `manage`) y respuestas de consultas (`answerFinancialQuery`). |
-| [`src/telegram.ts`](src/telegram.ts) | Comandos (`/start`, `/cuentas`, `/saldos`, `/resumen`, `/futuro`, `/ultimos`), botones inline (`ok`, `catm`, `accm`, `tagm`, `resv`, `del`, `delacc`, `delcat`, `deltag`), manejo de texto/audio/foto. |
-| [`src/auth.ts`](src/auth.ts) | Validación constante de `DASHBOARD_TOKEN` (`Bearer`) y verificación criptográfica HMAC-SHA256 de Telegram `initData`. |
-| [`src/types.ts`](src/types.ts) | Contratos TypeScript compartidos de backend. |
-| [`src/utils.ts`](src/utils.ts) | Helpers de zona horaria (`todayInTimezone`, `currentMonthInTimezone`), meses (`addMonths`, `monthDiff`, `previousMonths`), IDs y formato ARS/USD. |
+| [`src/index.ts`](src/index.ts) | Entrypoint Hono: `/webhook/telegram`, `/api/bootstrap` (snapshot único en D1), CRUD `/api/accounts`, `POST /api/accounts/:id/reconcile`, `/api/categories`, `/api/tags`, `/api/recurring`, `/api/transactions`, `POST /api/transactions/shared`, `/api/cards/:id/pay-statement`, `/api/projection`, `/api/export.csv`, `/api/health`. |
+| [`src/db.ts`](src/db.ts) | Consultas D1 (`loadAllDataSnapshot` con 6 consultas vía `db.batch`) y funciones puras de negocio/contabilidad (`computeAccountBalances`, `computeCardStatements` con `pending`/`partial`/`paid`, `computeOverdueCardAlerts`, `computePeriodMetrics` con `paid_statement_items`, `computeFutureProjection`, `payCardStatement`, `reconcileAccountBalance`, `createSharedPurchase`, CRUD con `ConflictError` `409`). |
+| [`src/gemini.ts`](src/gemini.ts) | Esquema JSON estricto (`PARSE_SCHEMA`), sanitización (`sanitizeParsedIntent`), parser multimodal (`record` / `query` / `manage`) acotado a `ARS`/`USD`/`BRL` y respuestas de consultas (`answerFinancialQuery`). |
+| [`src/telegram.ts`](src/telegram.ts) | Comandos (`/start`, `/ayuda`, `/help`, `/cuentas`, `/config`, `/saldos`, `/resumen`, `/mes`, `/futuro`, `/ultimos`), botones inline (`ok`, `catm`, `cat`, `accm`, `acc`, `tagm`, `tagt`/`tagi`, `back`, `resv`, `del`, `delacc`, `delcat`, `deltag`), verificación *fail-closed* de usuario/chat privado y manejo de texto/audio/foto. |
+| [`src/auth.ts`](src/auth.ts) | Validación *fail-closed* en tiempo constante vía SHA-256 de `DASHBOARD_TOKEN` (`Bearer`) y verificación criptográfica HMAC-SHA256 de Telegram `initData` (`auth_date` obligatorio <= 24h y `ALLOWED_TELEGRAM_USER_ID`). |
+| [`src/types.ts`](src/types.ts) | Contratos TypeScript compartidos de backend (`SUPPORTED_CURRENCIES = ['ARS', 'USD', 'BRL']`, `PaidStatementItem`, `CardStatement`, etc.). |
+| [`src/utils.ts`](src/utils.ts) | Helpers de zona horaria (`todayInTimezone`, `currentMonthInTimezone`), meses (`addMonths`, `monthDiff`, `previousMonths`), IDs y formato `ARS`/`USD`/`BRL` (`$`, `US$`, `R$`). |
 | [`migrations/0001_initial.sql`](migrations/0001_initial.sql) | Esquema limpio v3 ya aplicado en producción (`0` cuentas iniciales, `22` categorías base, `5` etiquetas base). |
-| [`web/src/App.tsx`](web/src/App.tsx) | Orquestador de estado del Dashboard, filtros y montaje único de modales. |
+| [`migrations/0002_indexes.sql`](migrations/0002_indexes.sql) | Índices adicionales en `transactions(to_account_id)`, `recurring_items(account_id)` y `transactions(telegram_message_id)` para deduplicación de webhook. |
+| [`web/src/App.tsx`](web/src/App.tsx) | Orquestador de estado del Dashboard, filtros (con atribución vía `paid_statement_items` y `referencedTransactions`) y montaje único de modales. |
 | [`web/src/api.ts`](web/src/api.ts) | Cliente HTTP hacia `/api/*` y formateo monetario (`formatMoney`). |
 | [`web/src/components/`](web/src/components/) | `SummaryCards`, `CurrentStatusBar`, `AccountsGrid`, `CreditCardsSection`, `CategoryChart`, `MonthlyChart`, `TagsPanel`, `FutureProjectionCard`, `TransactionList`, `AccountModal`, `RecurringModal`, `TransactionModal`, `SettingsModal`, `DateRangePicker`. |
-| [`test/core.test.ts`](test/core.test.ts) | Tests unitarios de lógica contable, cuotas, `budget_month`, `start_month`, `due_day`, alertas vencidas, auth y `sanitizeParsedIntent`. |
+| [`test/core.test.ts`](test/core.test.ts) | Tests unitarios de lógica contable, cuotas, `budget_month`, `start_month`, `due_day`, alertas vencidas, pagos parciales, auth *fail-closed* y `sanitizeParsedIntent`. |
 | [`docs/`](docs/) | [`ARQUITECTURA.md`](docs/ARQUITECTURA.md), [`MODELO_DATOS.md`](docs/MODELO_DATOS.md), [`PLAN_V3_AGNOSTICO.md`](docs/PLAN_V3_AGNOSTICO.md) y [`ROADMAP.md`](docs/ROADMAP.md). |
 | `wrangler.example.toml` / `.dev.vars.example` | Plantillas públicas para levantar instancias limpias sin secretos ni IDs propios. |
-| `imports/`, `.dev.vars`, `.wrangler/`, `.agent/` | **Ignorados en `.gitignore`.** Contienen datos personales del usuario (CSV, script de migración local, secretos y estado D1 local). **Nunca** trackear ni subir a Git. |
+| `wrangler.toml`, `imports/`, `.dev.vars`, `.wrangler/`, `.agent/` | **Ignorados en `.gitignore`.** Contienen configuración personal de despliegue (`database_id`, `DASHBOARD_URL`), datos personales del usuario (CSV, migrador local), secretos y estado D1 local. **Nunca** trackear ni subir a Git. |
 
 ---
 
@@ -41,11 +42,12 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
 
 1. **Repositorio 100% agnóstico:**
    - **Prohibido** hardcodear nombres propios, bancos, tarjetas personales, personas reales o IDs fijos (`'mp'`, `'bbva'`, `'abril'`, etc.) en código, migraciones, tests o docs.
-   - Resolver cuentas por capacidades (`is_default = 1`, `type IN ('wallet','savings','cash','credit_card')`, `currency`).
+   - Resolver cuentas por capacidades (`is_default = 1`, `type IN ('wallet','savings','cash','credit_card')`, `currency` en `ARS`, `USD` o `BRL`).
+   - `wrangler.toml` se mantiene fuera de Git (listado en `.gitignore`); solo se versiona `wrangler.example.toml`.
 
 2. **Contabilidad de tarjetas (`expense` vs. `transfer` con `statement_month`):**
    - Los `expense` y `third_party` en una `credit_card` descuentan el saldo de la tarjeta al instante (deuda negativa), pero **no** suman en consumo `cash` del período al pasar la tarjeta.
-   - El gasto entra en consumo real recién cuando se paga el resumen mediante `transfer` con `to_account_id = card.id` y `statement_month` (`YYYY-MM`), prorrateando solo la porción propia (`own_total`) por categoría y etiqueta.
+   - El gasto entra en consumo real recién cuando se paga el resumen mediante `transfer` con `to_account_id = card.id` y `statement_month` (`YYYY-MM`), con asignación cronológica acumulada para pagos parciales/múltiples (`status: 'pending' | 'partial' | 'paid'`), prorrateando solo la porción propia (`own_total`) por categoría y etiqueta, y exponiendo `paid_statement_items` + `referencedTransactions` en `/api/bootstrap`.
    - `third_party` y `third_party_repayment` nunca suman al consumo personal ni a ingresos.
 
 3. **Semántica de fechas y vencimientos:**
@@ -60,15 +62,41 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
    - Si se cambia la cuenta de una transacción o gasto fijo (`PATCH /api/recurring/:id` o callback de Telegram), mantener sincronizada `currency`.
 
 5. **Migraciones D1 inmutables:**
-   - `migrations/0001_initial.sql` **ya está aplicada en producción**.
-   - Todo cambio futuro de esquema **debe** crearse como un nuevo archivo numerado (`migrations/0002_...sql`, `0003_...sql`) y probarse primero en `--local`.
+   - `migrations/0001_initial.sql` y `migrations/0002_indexes.sql` son inmutables una vez aplicadas en producción.
+   - Todo cambio futuro de esquema **debe** crearse como un nuevo archivo numerado (`migrations/0003_...sql`, etc.) y probarse primero en `--local`.
 
 6. **SDK de Gemini:**
    - Usar únicamente `@google/genai` con `ai.interactions.create` (`GEMINI_MODEL = 'gemini-3.5-flash-lite'`), nunca APIs legacy.
 
 ---
 
-## 4. Comandos y Entorno Local
+## 4. Decisiones y Evolución de Invariantes (v3.1)
+
+Al auditar **v3.0** contra el comportamiento real del motor contable, los endpoints y la seguridad en producción, se refinaron y cerraron explícitamente cinco invariantes:
+
+1. **Monedas acotadas estrictamente a `ARS`, `USD`, `BRL` (`$`, `US$`, `R$`):**
+   - *Por qué:* anteriormente el `README.md`, `docs/MODELO_DATOS.md` y `AccountModal` mencionaban "otras monedas" (`EUR`, `CLP`, `UYU`, `MXN`, etc.), mientras que el motor contable y Gemini solo procesaban `ARS` y `USD`, descartando silenciosamente el resto o mezclando monedas distintas en totales de saldo/proyección.
+   - *Decisión:* se acota explícitamente a `ARS`, `USD` y `BRL` con validación en API, DB/lógica contable, Gemini (`SUPPORTED_CURRENCIES`) y UI para garantizar integridad contable real.
+
+2. **Atribución de resúmenes pagados en `TransactionList` (`paid_statement_items`):**
+   - *Por qué:* bajo la Opción B (`cash`), pagar un resumen de tarjeta en el mes `M` imputa a los gráficos y KPIs consumos realizados en meses previos o en cuotas. Al filtrar el dashboard por categoría o etiqueta, `TransactionList` solo miraba transacciones del rango de fechas activo, mostrando `Movimientos (0)` aunque los gráficos sí reflejaban ese consumo.
+   - *Decisión:* se mantiene intacta la contabilidad `cash` (Opción B), pero `/api/bootstrap` incorpora `paid_statement_items` y `referencedTransactions` para que el listado filtrado incluya los ítems de meses previos/cuotas pagados en el período y coincida 100% con los gráficos.
+
+3. **Pagos parciales y múltiples de resumen (`pending` / `partial` / `paid`):**
+   - *Por qué:* la suposición inicial de "1 transferencia = resumen pagado" fallaba ante adelantos o pagos en dos tramos: el primer pago parcial ocultaba alertas de vencimiento (`is_overdue`) y cada transferencia adicional volvía a absorber `third_party_total` desde cero.
+   - *Decisión:* se reemplaza por agregación cronológica acumulada por `(tarjeta, statement_month)` (`remaining_due`, `paid_transaction_ids`, `paid_amount`, `status: 'pending' | 'partial' | 'paid'`).
+
+4. **Seguridad *fail-closed* por defecto:**
+   - *Por qué:* en v3.0, si faltaba `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID` o `auth_date` en `initData`, el endpoint aceptaba peticiones en lugar de rechazarlas, y no se validaba que los mensajes de Telegram provinieran del chat privado del dueño (`chat.id === allowedId`).
+   - *Decisión:* `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID`, `DASHBOARD_TOKEN`, `auth_date` obligatorio en `initData` y chats privados (`chat.id === allowedId`) pasan a ser obligatorios (*fail-closed*) con comparación en tiempo constante vía SHA-256.
+
+5. **`wrangler.toml` excluido de Git:**
+   - *Por qué:* tener `wrangler.toml` trackeado contradecía la guía del `README.md` y exponía el `database_id` y `DASHBOARD_URL` personales de despliegue.
+   - *Decisión:* `wrangler.toml` se incorpora a `.gitignore` (preservando solo `wrangler.example.toml` en el repositorio), blindando la Invariante #1.
+
+---
+
+## 5. Comandos y Entorno Local
 
 ```bash
 # Instalar dependencias
@@ -95,7 +123,7 @@ npm run deploy
 
 ---
 
-## 5. Flujo Git y Reglas de Seguridad
+## 6. Flujo Git y Reglas de Seguridad
 
 - **Ramas:**
   - `main`: producción exacta (nunca desarrollar directo en `main`).

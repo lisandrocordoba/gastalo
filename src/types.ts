@@ -12,6 +12,9 @@ export interface Env {
   TIMEZONE: string;
 }
 
+export const SUPPORTED_CURRENCIES = ['ARS', 'USD', 'BRL'] as const;
+export type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number];
+
 export type AccountType = 'wallet' | 'savings' | 'credit_card' | 'cash';
 
 export type AccountingBasis = 'cash' | 'accrual';
@@ -140,6 +143,7 @@ export interface SharedPurchaseInput {
   third_party_name: string;
   installments_total?: number | null;
   first_installment_month?: string | null;
+  statement_month?: string | null;
   tags?: string[];
   source: string;
   raw_input?: string | null;
@@ -190,6 +194,7 @@ export type ManageOperation =
 export interface ParsedIntent {
   intent: 'record' | 'query' | 'manage' | 'unknown';
   reply_text?: string;
+  transcribed_query?: string | null;
   transactions: ParsedTransactionDraft[];
   operations: ManageOperation[];
 }
@@ -252,10 +257,12 @@ export interface CardStatement {
   total_due: number;
   own_total: number;
   third_party_total: number;
-  status: 'pending' | 'paid';
+  status: 'pending' | 'partial' | 'paid';
   paid_transaction_id: string | null;
+  paid_transaction_ids: string[];
   paid_at: string | null;
   paid_amount: number | null;
+  remaining_due: number;
   items: CardStatementItem[];
   recurring_items: CardStatementRecurringItem[];
 }
@@ -279,6 +286,24 @@ export interface PayStatementInput {
   description?: string;
 }
 
+export interface PaidStatementItem {
+  transaction_id: string;
+  payment_transaction_id: string;
+  card_account_id: string;
+  card_account_name: string;
+  statement_month: string;
+  paid_at: string;
+  occurred_at: string;
+  description: string;
+  category_id: string | null;
+  tags: string[];
+  installment_number: number;
+  installments_total: number;
+  installment_amount: number;
+  prorated_amount: number;
+  currency: string;
+}
+
 export interface MonthSummary {
   month: string;
   from: string;
@@ -288,10 +313,12 @@ export interface MonthSummary {
   expense: number;
   card_purchases: number;
   card_purchases_usd: number;
+  card_purchases_brl: number;
   investment: number;
   net: number;
   net_after_investment: number;
   usd_expense: number;
+  brl_expense: number;
   by_category: CategoryBreakdown[];
   by_tag: TagBreakdown[];
   third_party_pending: number;
@@ -299,6 +326,7 @@ export interface MonthSummary {
   accounts: AccountWithBalance[];
   card_statements: CardStatement[];
   overdue_card_alerts: OverdueCardAlert[];
+  paid_statement_items: PaidStatementItem[];
 }
 
 export interface MonthlyHistoryPoint {
@@ -350,6 +378,7 @@ export interface MonthProjection {
   recurring: RecurringItem[];
   recurring_total_amount: number;
   recurring_usd_total_amount: number;
+  recurring_brl_total_amount: number;
   total_committed: number;
 }
 
