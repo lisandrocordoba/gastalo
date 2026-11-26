@@ -1,7 +1,7 @@
 # Plan de Evolución v3.0 — Aplicación Agnóstica y Configurable
 
-> **Estado:** Etapa 3.1 (Planificación aprobada) — en rama `dev`.  
-> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Modelo de Datos v2](MODELO_DATOS_V2.md).
+> **Estado:** Implementado en rama `dev` (Etapas 3.1 → 3.5 listas; pendiente Etapa 3.6 de release a producción).  
+> **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Modelo de Datos y Casos de Uso](MODELO_DATOS.md).
 
 ---
 

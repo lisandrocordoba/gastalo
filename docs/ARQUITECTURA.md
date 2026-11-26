@@ -22,10 +22,10 @@ flowchart LR
 
 ### ¿Qué pasa en cada flujo?
 1. **Cuando mandás un mensaje por Telegram:**
-   - Telegram envía un POST a `https://gasti-wallet.lisandro-dev.workers.dev/webhook/telegram`.
+   - Telegram envía un POST a `https://<tu-worker>.workers.dev/webhook/telegram`.
    - El Worker verifica el header secreto (`TELEGRAM_WEBHOOK_SECRET`) y tu ID de usuario (`ALLOWED_TELEGRAM_USER_ID`), responde `200 OK` al instante para que Telegram no reintente, y procesa el mensaje en segundo plano (`waitUntil`, con un tope de 30 segundos en Cloudflare).
-   - Llama a **Gemini (`gemini-3.5-flash-lite`)** con esquema JSON estricto para extraer monto, cuenta, categoría, tipo (`expense` / `income` / `transfer`) y descripción.
-   - Guarda en **D1** y te responde por Telegram con botones interactivos (`✅ OK`, `✏️ Categoría`, `🔄 Cuenta`, `🗑️ Borrar`).
+   - Llama a **Gemini (`gemini-3.5-flash-lite`)** con esquema JSON estricto usando **las cuentas, categorías y etiquetas reales cargadas en tu base D1** para extraer movimientos (`record`), consultas (`query`) o altas de configuración (`manage`: crear cuentas, tarjetas, categorías o etiquetas).
+   - Guarda en **D1** y te responde por Telegram con botones interactivos (`✅ OK`, `✏️ Categoría`, `🔄 Cuenta`, `🏷️ Etiquetas`, `🗑️ Borrar`).
 2. **Cuando abrís el Dashboard (PWA o Mini App):**
    - El mismo Worker sirve los archivos estáticos compilados de React (`web/dist`) sin pasar por Node ni gastar cómputo innecesario.
    - Las llamadas a `/api/*` sí ejecutan el Worker, validan tu identidad (`DASHBOARD_TOKEN` o firma criptográfica HMAC de Telegram `initData`) y consultan **D1**.
@@ -54,7 +54,7 @@ flowchart LR
 ### D. Configuración pública vs. Secretos
 | Dónde vive | Qué va ahí | ¿Se sube a Git? |
 | :--- | :--- | :---: |
-| `[vars]` en [wrangler.toml](../wrangler.toml) | Configuración **no sensible**: `APP_ENV`, `DEFAULT_CURRENCY`, `TIMEZONE`, `DASHBOARD_URL`. | **Sí** |
+| `[vars]` en [wrangler.example.toml](../wrangler.example.toml) → `wrangler.toml` | Configuración **no sensible**: `APP_ENV`, `DEFAULT_CURRENCY`, `TIMEZONE`, `DASHBOARD_URL` y tu `database_id` de D1. | Plantilla sí; instancia personal local si usás fork propio |
 | `.dev.vars` (copiado de [.dev.vars.example](../.dev.vars.example)) | Claves para **desarrollo local**: `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `TELEGRAM_WEBHOOK_SECRET`, `DASHBOARD_TOKEN`. | **Nunca** (en `.gitignore`) |
 | `npx wrangler secret put <NOMBRE>` | Claves cifradas en **producción** dentro de Cloudflare. | **Nunca** |
 
@@ -112,12 +112,11 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 
 ---
 
-## 6. Modelo de Datos Actual (v1) y Próximo Paso
+## 6. Modelo de Datos Agnóstico (v3)
 
-El esquema actual en [migrations/0001_initial.sql](../migrations/0001_initial.sql) tiene 3 tablas:
-- `accounts`: `mp` (Mercado Pago), `mp_reservas` (MP Reservas), `bbva_credito` (BBVA Crédito), `efectivo` (Efectivo).
-- `categories`: 10 categorías de gasto + 3 de ingreso (ej. hoy falta *Deportes / Recreación* para cosas como alquiler de cancha).
-- `transactions`: movimientos de tipo `expense`, `income` o `transfer`, con `account_id`, `to_account_id`, `category_id`, `amount`, `currency`, `occurred_at`, `source` y `raw_input`.
+El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **21 categorías** y **5 etiquetas**:
+- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en cualquier moneda, con color propio y flag `is_default`.
+- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B), terceros y compras compartidas (`linked_group_id`).
+- **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales.
 
-### Evolución a Modelo de Datos v2
-La especificación completa del **Modelo de Datos v2** (6 cuentas, 16 categorías de gasto + 4 de ingreso, etiquetas N:M, inversiones, cuotas, gastos fijos y guía de *edge cases* de gastos compartidos) ya está documentada en [Modelo de Datos v2 y Casos de Uso](MODELO_DATOS_V2.md).
+Para el detalle completo de reglas contables y casos de uso, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md) y [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md).

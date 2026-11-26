@@ -84,48 +84,48 @@ describe('agnostic account selection and savings aggregation', () => {
 
 describe('double-entry accounting v2 balances', () => {
   const accounts: Account[] = [
-    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 100000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
-    { id: 'mp_reservas', name: 'MP Reservas', type: 'savings', currency: 'ARS', initial_balance: 50000, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01' },
-    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
-    { id: 'efectivo', name: 'Efectivo', type: 'cash', currency: 'ARS', initial_balance: 10000, color: '#22C55E', is_default: 0, created_at: '2026-01-01' },
+    { id: 'wallet_main', name: 'Billetera', type: 'wallet', currency: 'ARS', initial_balance: 100000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
+    { id: 'savings_main', name: 'Reservas', type: 'savings', currency: 'ARS', initial_balance: 50000, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01' },
+    { id: 'card_ars', name: 'Tarjeta Crédito', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
+    { id: 'cash', name: 'Efectivo', type: 'cash', currency: 'ARS', initial_balance: 10000, color: '#22C55E', is_default: 0, created_at: '2026-01-01' },
   ];
 
-  it('handles BBVA negative credit card balance, card payment transfer, and reservas transfer', () => {
+  it('handles negative credit card balance, card payment transfer, and savings transfer', () => {
     const txs = [
-      { type: 'income' as const, amount: 1000000, account_id: 'mp', to_account_id: null },
-      { type: 'expense' as const, amount: 150000, account_id: 'bbva_credito', to_account_id: null },
-      { type: 'expense' as const, amount: 4000, account_id: 'efectivo', to_account_id: null },
-      { type: 'transfer' as const, amount: 300000, account_id: 'mp', to_account_id: 'mp_reservas' },
-      { type: 'transfer' as const, amount: 150000, account_id: 'mp', to_account_id: 'bbva_credito' },
+      { type: 'income' as const, amount: 1000000, account_id: 'wallet_main', to_account_id: null },
+      { type: 'expense' as const, amount: 150000, account_id: 'card_ars', to_account_id: null },
+      { type: 'expense' as const, amount: 4000, account_id: 'cash', to_account_id: null },
+      { type: 'transfer' as const, amount: 300000, account_id: 'wallet_main', to_account_id: 'savings_main' },
+      { type: 'transfer' as const, amount: 150000, account_id: 'wallet_main', to_account_id: 'card_ars' },
     ];
 
     const result = computeAccountBalances(accounts, txs);
     const byId = Object.fromEntries(result.map((a) => [a.id, a.balance]));
 
-    expect(byId.mp).toBe(650000);
-    expect(byId.mp_reservas).toBe(350000);
-    expect(byId.bbva_credito).toBe(0);
-    expect(byId.efectivo).toBe(6000);
+    expect(byId.wallet_main).toBe(650000);
+    expect(byId.savings_main).toBe(350000);
+    expect(byId.card_ars).toBe(0);
+    expect(byId.cash).toBe(6000);
   });
 
-  it('handles investment, third-party split in installments, repayment to reservas, and adjustments', () => {
+  it('handles investment, third-party split in installments, repayment to savings, and adjustments', () => {
     const txs = [
-      { type: 'expense' as const, amount: 22000, account_id: 'bbva_credito', to_account_id: null, third_party_name: null },
-      { type: 'third_party' as const, amount: 22000, account_id: 'bbva_credito', to_account_id: null, third_party_name: 'Jere' },
-      { type: 'third_party_repayment' as const, amount: 22000, account_id: 'mp', to_account_id: null, third_party_name: 'Jere' },
-      { type: 'transfer' as const, amount: 22000, account_id: 'mp', to_account_id: 'mp_reservas', third_party_name: null },
-      { type: 'investment' as const, amount: 80000, account_id: 'mp', to_account_id: null, third_party_name: null },
-      { type: 'adjustment' as const, amount: -1500, account_id: 'efectivo', to_account_id: null, third_party_name: null },
-      { type: 'adjustment' as const, amount: 500, account_id: 'efectivo', to_account_id: null, third_party_name: null },
+      { type: 'expense' as const, amount: 22000, account_id: 'card_ars', to_account_id: null, third_party_name: null },
+      { type: 'third_party' as const, amount: 22000, account_id: 'card_ars', to_account_id: null, third_party_name: 'Ana' },
+      { type: 'third_party_repayment' as const, amount: 22000, account_id: 'wallet_main', to_account_id: null, third_party_name: 'Ana' },
+      { type: 'transfer' as const, amount: 22000, account_id: 'wallet_main', to_account_id: 'savings_main', third_party_name: null },
+      { type: 'investment' as const, amount: 80000, account_id: 'wallet_main', to_account_id: null, third_party_name: null },
+      { type: 'adjustment' as const, amount: -1500, account_id: 'cash', to_account_id: null, third_party_name: null },
+      { type: 'adjustment' as const, amount: 500, account_id: 'cash', to_account_id: null, third_party_name: null },
     ];
 
     const balances = Object.fromEntries(
       computeAccountBalances(accounts, txs).map((a) => [a.id, a.balance])
     );
-    expect(balances.bbva_credito).toBe(-44000);
-    expect(balances.mp).toBe(20000);
-    expect(balances.mp_reservas).toBe(72000);
-    expect(balances.efectivo).toBe(9000);
+    expect(balances.card_ars).toBe(-44000);
+    expect(balances.wallet_main).toBe(20000);
+    expect(balances.savings_main).toBe(72000);
+    expect(balances.cash).toBe(9000);
 
     const tp = computeThirdPartyBalances(txs);
     expect(tp.total_pending).toBe(0);
@@ -134,28 +134,28 @@ describe('double-entry accounting v2 balances', () => {
 
   it('tracks remaining third-party balances when partially repaid', () => {
     const tp = computeThirdPartyBalances([
-      { type: 'third_party', amount: 109341, third_party_name: 'Carlos' },
-      { type: 'third_party_repayment', amount: 109000, third_party_name: 'carlos' },
-      { type: 'third_party', amount: 15000, third_party_name: 'Mario' },
+      { type: 'third_party', amount: 109341, third_party_name: 'Luis' },
+      { type: 'third_party_repayment', amount: 109000, third_party_name: 'luis' },
+      { type: 'third_party', amount: 15000, third_party_name: 'Sofía' },
     ]);
     expect(tp.total_pending).toBe(15341);
     expect(tp.by_person).toEqual([
-      { person: 'Mario', pending: 15000 },
-      { person: 'Carlos', pending: 341 },
+      { person: 'Sofía', pending: 15000 },
+      { person: 'Luis', pending: 341 },
     ]);
   });
 });
 
-describe('future projection (installments + recurring vs reservas)', () => {
-  it('projects overlapping installments and active recurring expenses against MP Reservas', () => {
+describe('future projection (installments + recurring vs savings)', () => {
+  it('projects overlapping installments and active recurring expenses against savings balance', () => {
     const txs = [
       {
         id: 't1',
         type: 'expense' as const,
         amount: 22000,
         currency: 'ARS',
-        account_id: 'bbva_credito',
-        description: 'Crocs papá (mi parte)',
+        account_id: 'card_ars',
+        description: 'Regalo (mi parte)',
         installments_total: 3,
         first_installment_month: '2026-12',
         third_party_name: null,
@@ -165,18 +165,18 @@ describe('future projection (installments + recurring vs reservas)', () => {
         type: 'third_party' as const,
         amount: 22000,
         currency: 'ARS',
-        account_id: 'bbva_credito',
-        description: 'Crocs papá (parte Jere)',
+        account_id: 'card_ars',
+        description: 'Regalo (parte Ana)',
         installments_total: 3,
         first_installment_month: '2026-12',
-        third_party_name: 'Jere',
+        third_party_name: 'Ana',
       },
       {
         id: 't3',
         type: 'expense' as const,
         amount: 60000,
         currency: 'ARS',
-        account_id: 'bbva_credito',
+        account_id: 'card_ars',
         description: 'Auriculares',
         installments_total: 2,
         first_installment_month: '2026-12',
@@ -187,12 +187,12 @@ describe('future projection (installments + recurring vs reservas)', () => {
     const recurring: RecurringItem[] = [
       {
         id: 'r1',
-        name: 'Tuenti',
+        name: 'Plan móvil',
         type: 'expense',
         amount: 12000,
         currency: 'ARS',
-        account_id: 'mp',
-        category_id: 'suscripciones_servicios',
+        account_id: 'wallet_main',
+        category_id: 'suscripciones',
         day_of_month: 5,
         active: 1,
         created_at: '2026-01-01',
@@ -203,7 +203,7 @@ describe('future projection (installments + recurring vs reservas)', () => {
         type: 'expense',
         amount: 50000,
         currency: 'ARS',
-        account_id: 'mp',
+        account_id: 'wallet_main',
         category_id: 'otros',
         day_of_month: 10,
         active: 0,
@@ -467,8 +467,8 @@ describe('auth verification', () => {
 
 describe('credit card Opción B (cash flow on statement payment)', () => {
   const accounts: Account[] = [
-    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 1000000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
-    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
+    { id: 'wallet_main', name: 'Billetera', type: 'wallet', currency: 'ARS', initial_balance: 1000000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
+    { id: 'card_ars', name: 'Tarjeta Crédito', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
   ];
   const categories: Category[] = [
     { id: 'salud', name: 'Salud', icon: '💊', type: 'expense', color: '#26A69A' },
@@ -500,9 +500,9 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
         id: 'dentist',
         type: 'expense',
         amount: 632640,
-        account_id: 'bbva_credito',
+        account_id: 'card_ars',
         category_id: 'salud',
-        description: 'Dental system',
+        description: 'Odontología',
         occurred_at: '2026-04-23',
         installments_total: 6,
         first_installment_month: '2026-05',
@@ -511,24 +511,24 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
         id: 'gift_own',
         type: 'expense',
         amount: 22000,
-        account_id: 'bbva_credito',
+        account_id: 'card_ars',
         category_id: 'regalos',
-        description: 'Crocs papá (mi parte)',
+        description: 'Regalo (mi parte)',
         occurred_at: '2026-04-25',
         installments_total: 2,
         first_installment_month: '2026-05',
         tags: ['familia'],
       }),
       makeTx({
-        id: 'gift_jere',
+        id: 'gift_third',
         type: 'third_party',
         amount: 22000,
-        account_id: 'bbva_credito',
-        description: 'Crocs papá (parte Jere)',
+        account_id: 'card_ars',
+        description: 'Regalo (parte Ana)',
         occurred_at: '2026-04-25',
         installments_total: 2,
         first_installment_month: '2026-05',
-        third_party_name: 'Jere',
+        third_party_name: 'Ana',
       }),
     ];
 
@@ -542,8 +542,8 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
     expect(aprilCash.expense).toBe(0);
     expect(aprilCash.card_purchases).toBe(654640);
     expect(aprilCash.card_purchases_usd).toBe(0);
-    expect(aprilCash.accounts.find((a) => a.id === 'mp')?.balance).toBe(1000000);
-    expect(aprilCash.accounts.find((a) => a.id === 'bbva_credito')?.balance).toBe(-676640);
+    expect(aprilCash.accounts.find((a) => a.id === 'wallet_main')?.balance).toBe(1000000);
+    expect(aprilCash.accounts.find((a) => a.id === 'card_ars')?.balance).toBe(-676640);
 
     // April in accrual mode: shows own purchases (632640 + 22000 = 654640)
     const aprilAccrual = computePeriodMetrics(accounts, txsBeforePayment, categories, tags, {
@@ -554,7 +554,7 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
     });
     expect(aprilAccrual.expense).toBe(654640);
 
-    // May statement before paying: pending 105440 + 11000 (own) + 11000 (Jere) = 127440
+    // May statement before paying: pending 105440 + 11000 (own) + 11000 (Ana) = 127440
     const mayPending = computeCardStatements(accounts, txsBeforePayment, '2026-05')[0];
     expect(mayPending.status).toBe('pending');
     expect(mayPending.own_total).toBe(116440);
@@ -570,16 +570,16 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
     });
     expect(mayBeforePay.expense).toBe(0);
 
-    // User pays May statement on 2026-05-05 from MP
+    // User pays May statement on 2026-05-05 from liquid wallet
     const txsAfterPayment: Transaction[] = [
       ...txsBeforePayment,
       makeTx({
         id: 'pay_may',
         type: 'transfer',
         amount: 127440,
-        account_id: 'mp',
-        to_account_id: 'bbva_credito',
-        description: 'Pago resumen TC BBVA 2026-05',
+        account_id: 'wallet_main',
+        to_account_id: 'card_ars',
+        description: 'Pago resumen Tarjeta Crédito 2026-05',
         occurred_at: '2026-05-05',
         statement_month: '2026-05',
       }),
@@ -592,9 +592,9 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
       statementMonth: '2026-05',
     });
 
-    // MP decreased by 127440, BBVA debt decreased by 127440 -> -549200
-    expect(mayAfterPay.accounts.find((a) => a.id === 'mp')?.balance).toBe(872560);
-    expect(mayAfterPay.accounts.find((a) => a.id === 'bbva_credito')?.balance).toBe(-549200);
+    // Wallet decreased by 127440, Card debt decreased by 127440 -> -549200
+    expect(mayAfterPay.accounts.find((a) => a.id === 'wallet_main')?.balance).toBe(872560);
+    expect(mayAfterPay.accounts.find((a) => a.id === 'card_ars')?.balance).toBe(-549200);
     // Personal cash expense equals own share only (105440 Salud + 11000 Regalos = 116440)
     expect(mayAfterPay.expense).toBe(116440);
     expect(mayAfterPay.card_purchases).toBe(0);

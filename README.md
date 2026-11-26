@@ -1,12 +1,17 @@
 # Gasti Personal (Telegram + Gemini + Cloudflare Workers/D1 + PWA)
 
-Asistente personal de finanzas 100% gratuito (\$0/mes) diseñado para el flujo argentino:
-- **Mercado Pago** como cuenta principal, **MP Reservas**, **BBVA Crédito** (gastos en negativo + pago mensual como transferencia desde MP) y **Efectivo**.
-- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`)**: entiende texto libre, notas de voz y fotos de tickets/comprobantes.
-- **Dashboard Web (PWA + Telegram Mini App)**: saldos por cuenta, gráficos por categoría, evolución mensual de 6 meses, buscador, edición y exportación a CSV.
+Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al levantarlo arranca limpio (sin cuentas predefinidas) para que configures tus propios bancos, billeteras, efectivo, cuentas de ahorro/reservas y tarjetas de crédito (ARS, USD u otras monedas) desde el **Dashboard Web** o conversacionalmente por **Telegram**.
 
-> 📘 **Documentación técnica y flujo de trabajo:** leé [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) para entender la infraestructura en Cloudflare, los límites del plan gratuito (\$0/mes), las medidas de seguridad y la política de versionado (desarrollo local + deploy controlado solo desde `main`).  
-> 📐 **Modelo de Datos v2 y Casos de Uso:** consultá [docs/MODELO_DATOS_V2.md](docs/MODELO_DATOS_V2.md) para el detalle de cuentas, categorías, etiquetas, cuotas, inversiones y manejo de gastos compartidos.
+### Características principales
+- **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito, categorías y etiquetas.
+- **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`), responder consultas o crear nuevas cuentas/categorías/etiquetas por chat (`/cuentas`).
+- **Tarjetas de crédito con flujo real (Opción B):** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen desde el Dashboard (`💳 Pagar resumen`), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría.
+- **Cuotas, compartidos y proyección futura:** control de compras en cuotas, división de gastos con terceros, filtro interactivo por cuenta/tarjeta/categoría/etiqueta, rango de fechas flexible y proyección a 3 meses vs. tus cuentas de reservas.
+- **Dashboard Web (PWA + Telegram Mini App):** gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
+
+> 📘 **Arquitectura e infraestructura:** [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md)  
+> 📐 **Modelo contable y casos de uso:** [docs/MODELO_DATOS.md](docs/MODELO_DATOS.md)  
+> 🧭 **Plan v3 agnóstico:** [docs/PLAN_V3_AGNOSTICO.md](docs/PLAN_V3_AGNOSTICO.md)
 
 ---
 
@@ -36,11 +41,12 @@ Asistente personal de finanzas 100% gratuito (\$0/mes) diseñado para el flujo a
 npm install
 npm --prefix web install
 
-# Copiar variables de ejemplo para desarrollo local
+# Copiar configuración de Cloudflare y secretos locales
+cp wrangler.example.toml wrangler.toml
 cp .dev.vars.example .dev.vars
 # Completar .dev.vars con tus claves
 
-# Crear la base de datos local y aplicar migraciones
+# Crear la base de datos local y aplicar el esquema limpio
 npm run db:migrate:local
 
 # Ejecutar tests y verificar build
@@ -64,7 +70,7 @@ npm run dev
    ```bash
    npx wrangler d1 create wallet-db
    ```
-   Copiá el `database_id` que imprime y pegalo en `wrangler.toml`.
+   Copiá el `database_id` que imprime y actualizalo en `wrangler.toml` junto con tu `DASHBOARD_URL`.
 3. Aplicá las migraciones en la nube:
    ```bash
    npm run db:migrate:remote
@@ -77,7 +83,7 @@ npm run dev
    npx wrangler secret put ALLOWED_TELEGRAM_USER_ID
    npx wrangler secret put DASHBOARD_TOKEN
    ```
-   *(Para `TELEGRAM_WEBHOOK_SECRET` y `DASHBOARD_TOKEN` podés inventar cualquier string largo aleatorio).*
+   *(Para `TELEGRAM_WEBHOOK_SECRET` y `DASHBOARD_TOKEN` podés usar cualquier string largo aleatorio).*
 5. Desplegá la app completa (frontend + worker):
    ```bash
    npm run deploy
@@ -91,11 +97,14 @@ npm run dev
 
 ---
 
-## Cómo usarlo todos los días
-- **Gasto común (va a Mercado Pago por defecto):** `"Café 3500"` o un audio `"Compré carne por 18 lucas"`
-- **Efectivo:** `"8500 verdulería en efectivo"`
-- **Tarjeta BBVA:** `"Farmacity 24000 con BBVA"` o `"Zapatillas 120k en 3 cuotas tarjeta"`
-- **Reservas:** `"Pasé 150k a reservas"` / `"Saqué 40k de reservas"`
-- **Pago de resumen BBVA:** `"Pagué la tarjeta 280000"` *(registra transferencia `MP → BBVA Crédito`)*
-- **Fotos:** Sacá foto a un ticket o mandá captura de comprobante.
-- **Consultas:** `"¿Cuánto gasté en comida este mes?"`, `/resumen`, `/saldos`, `/ultimos`.
+## Primeros pasos y uso diario
+1. **Creá tus primeras cuentas** desde el onboarding del Dashboard (`+ Crear primera cuenta` / `+ Agregar tarjeta`) o directo por Telegram:
+   - `"Creá mi cuenta principal Billetera en ARS"`
+   - `"Creá cuenta de ahorros Reservas en ARS"`
+   - `"Agregá tarjeta de crédito Visa en ARS"`
+2. **Cargá movimientos con texto, audio o foto:**
+   - **Gasto en cuenta principal:** `"Café 3500 hormiga"` o `"Verdulería 18k"`
+   - **En cuotas con tarjeta:** `"Zapatillas 120k en 3 cuotas con Visa"`
+   - **Compra compartida:** `"Regalo 44k en 3 cuotas con Visa, mitad de Ana"`
+   - **Inversión / Transferencia:** `"Invertí 150k en ETF"` / `"Pasé 50k a Reservas"`
+   - **Consultas:** `"¿Cuánto gasté en #hormiga este mes?"`, `/cuentas`, `/resumen`, `/saldos`, `/futuro`, `/ultimos`.
