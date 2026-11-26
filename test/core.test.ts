@@ -1988,4 +1988,130 @@ describe('Lote 2: partial/multiple payments, BRL/USD accounting, recurring match
     });
     expect(history.find((h) => h.month === '2026-11')?.expense).toBe(10350);
   });
+
+  it('computes single-pass overdue card alerts identically across 2,500 synthetic transactions', () => {
+    const bulkTxs: Transaction[] = [];
+    for (let i = 0; i < 2450; i++) {
+      const yr = 2022 + Math.floor(i / 650);
+      const mo = String((i % 12) + 1).padStart(2, '0');
+      const day = String((i % 28) + 1).padStart(2, '0');
+      bulkTxs.push(
+        makeTx({
+          id: `bulk_${i}`,
+          type: i % 9 === 0 ? 'income' : 'expense',
+          amount: 1000 + (i % 500),
+          currency: 'ARS',
+          account_id: 'wallet_ars',
+          category_id: i % 9 === 0 ? 'sueldo' : 'compras',
+          description: `Bulk tx ${i}`,
+          occurred_at: `${yr}-${mo}-${day}`,
+        })
+      );
+    }
+
+    const cards: Account[] = [
+      accounts[0],
+      { ...accounts[3], id: 'card_ars', name: 'Card ARS', due_day: 9, closing_day: 25 },
+      { ...accounts[4], id: 'card_usd', name: 'Card USD', due_day: 12, closing_day: 25 },
+    ];
+
+    bulkTxs.push(
+      // Paid historical statement (2026-04)
+      makeTx({
+        id: 'card_paid_exp',
+        type: 'expense',
+        amount: 20000,
+        account_id: 'card_ars',
+        description: 'Paid historical card purchase',
+        occurred_at: '2026-03-10',
+        statement_month: '2026-04',
+      }),
+      makeTx({
+        id: 'card_paid_pay',
+        type: 'transfer',
+        amount: 20000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Pay April statement',
+        occurred_at: '2026-04-08',
+        statement_month: '2026-04',
+      }),
+      // Partial overdue statement (2026-09): own 30000 + third_party 10000 - paid 14000 = 26000 remaining
+      makeTx({
+        id: 'card_part_own',
+        type: 'expense',
+        amount: 30000,
+        account_id: 'card_ars',
+        description: 'September card own charge',
+        occurred_at: '2026-08-10',
+        statement_month: '2026-09',
+      }),
+      makeTx({
+        id: 'card_part_tp',
+        type: 'third_party',
+        amount: 10000,
+        account_id: 'card_ars',
+        description: 'September card shared charge',
+        occurred_at: '2026-08-11',
+        statement_month: '2026-09',
+        third_party_name: 'Friend',
+      }),
+      makeTx({
+        id: 'card_part_pay',
+        type: 'transfer',
+        amount: 14000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Partial pay September statement',
+        occurred_at: '2026-09-09',
+        statement_month: '2026-09',
+      }),
+      // Pending overdue USD installment starting 2026-11 (overdue as of 2026-11-26)
+      makeTx({
+        id: 'card_usd_inst',
+        type: 'expense',
+        amount: 30,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'USD installment purchase',
+        occurred_at: '2026-10-10',
+        installments_total: 3,
+        first_installment_month: '2026-11',
+      })
+    );
+
+    const today = '2026-11-26';
+    const alerts = computeOverdueCardAlerts(cards, bulkTxs, today);
+    expect(alerts).toEqual([
+      {
+        account_id: 'card_ars',
+        account_name: 'Card ARS',
+        currency: 'ARS',
+        statement_month: '2026-09',
+        due_date: '2026-09-09',
+        total_due: 40000,
+        remaining_due: 26000,
+        status: 'partial',
+      },
+      {
+        account_id: 'card_usd',
+        account_name: 'Card USD',
+        currency: 'USD',
+        statement_month: '2026-11',
+        due_date: '2026-11-12',
+        total_due: 10,
+        remaining_due: 10,
+        status: 'pending',
+      },
+    ]);
+
+    const summary = computePeriodMetrics(cards, bulkTxs, categories, tags, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+      statementMonth: '2026-11',
+      today,
+    });
+    expect(summary.overdue_card_alerts).toEqual(alerts);
+  });
 });

@@ -89,13 +89,20 @@ export function formatCurrency(amount: number, currency = 'ARS'): string {
   return `${sign}${prefix} ${formatted}`;
 }
 
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
 export function todayInTimezone(tz = 'America/Argentina/Buenos_Aires'): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
+  let formatter = dateFormatterCache.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    dateFormatterCache.set(tz, formatter);
+  }
+  const parts = formatter.formatToParts(new Date());
   const y = parts.find((p) => p.type === 'year')?.value ?? '2026';
   const m = parts.find((p) => p.type === 'month')?.value ?? '01';
   const d = parts.find((p) => p.type === 'day')?.value ?? '01';

@@ -26,7 +26,7 @@ import {
   listRecurringItems,
   listTags,
   listTransactions,
-  loadAllDataSnapshot,
+  loadBootstrapSnapshot,
   payCardStatement,
   reconcileAccountBalance,
   updateAccount,
@@ -35,7 +35,7 @@ import {
   updateTag,
   updateTransaction,
 } from './db';
-import { handleTelegramUpdate, type TelegramUpdate } from './telegram';
+import type { TelegramUpdate } from './telegram';
 import {
   SUPPORTED_CURRENCIES,
   type Account,
@@ -153,7 +153,9 @@ app.post('/webhook/telegram', async (c) => {
     return c.json({ error: 'Invalid JSON' }, 400);
   }
 
-  c.executionCtx.waitUntil(handleTelegramUpdate(c.env, update));
+  c.executionCtx.waitUntil(
+    import('./telegram').then(({ handleTelegramUpdate }) => handleTelegramUpdate(c.env, update))
+  );
   return c.json({ ok: true });
 });
 
@@ -167,7 +169,8 @@ app.use('/api/*', async (c, next) => {
 
 app.get('/api/bootstrap', async (c) => {
   const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
-  const currentMonth = currentMonthInTimezone(tz);
+  const today = todayInTimezone(tz);
+  const currentMonth = today.slice(0, 7);
   const month = parseYearMonthParam(c.req.query('month'), 'month') ?? currentMonth;
   const fallbackRange = getMonthDateRange(month);
   const from = parseIsoDateParam(c.req.query('from'), 'from') ?? fallbackRange.start;
@@ -181,9 +184,12 @@ app.get('/api/bootstrap', async (c) => {
   const nextMonth = addMonths(currentMonth, 1);
 
   const defaultCurrency = normalizeCurrency(c.env.DEFAULT_CURRENCY, 'ARS') ?? 'ARS';
-  const today = todayInTimezone(tz);
 
-  const snapshot = await loadAllDataSnapshot(c.env.DB);
+  const snapshot = await loadBootstrapSnapshot(c.env.DB, {
+    from,
+    to,
+    includeMonthlyHistory: true,
+  });
   const summary = computePeriodMetrics(
     snapshot.accounts,
     snapshot.transactions,
@@ -196,12 +202,15 @@ app.get('/api/bootstrap', async (c) => {
       statementMonth,
       recurringItems: snapshot.recurringItems,
       today,
+      precomputedAccounts: snapshot.accountsWithBalances,
+      precomputedThirdParty: snapshot.thirdParty,
     }
   );
   const monthlyHistory = computeMonthlyHistory(snapshot.accounts, snapshot.transactions, {
     from,
     to,
     basis,
+    precomputedMonthlyRows: snapshot.monthlyHistoryRows,
   });
 
   const matched = snapshot.transactions.filter((tx) => {
@@ -458,13 +467,6 @@ app.post('/api/accounts', async (c) => {
     (!Number.isInteger(body.due_day) || body.due_day < 1 || body.due_day > 31)
   ) {
     return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
-  }
-  if (
-    body.closing_day !== undefined &&
-    body.closing_day !== null &&
-    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
-  ) {
-    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
   }
   if (
     body.closing_day !== undefined &&
