@@ -465,8 +465,20 @@ export function TransactionList({
 
                     <div className="flex shrink-0 items-center gap-2">
                       <span className={`text-sm font-semibold tabular-nums ${badge.color}`}>
-                        {badge.prefix}
-                        {formatMoney(tx.amount, tx.currency)}
+                        {tx.type === 'transfer' &&
+                        tx.to_amount != null &&
+                        toAcc &&
+                        toAcc.currency !== tx.currency ? (
+                          <>
+                            {formatMoney(tx.amount, tx.currency)} →{' '}
+                            {formatMoney(tx.to_amount, toAcc.currency)}
+                          </>
+                        ) : (
+                          <>
+                            {badge.prefix}
+                            {formatMoney(tx.amount, tx.currency)}
+                          </>
+                        )}
                       </span>
                       <button
                         type="button"

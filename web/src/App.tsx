@@ -349,25 +349,30 @@ export function App() {
                       : `${data.overdueStatements.length} resúmenes vencidos sin pagar:`}
                   </span>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {data.overdueStatements.map((alert) => (
-                      <button
-                        key={`${alert.account_id}:${alert.statement_month}`}
-                        type="button"
-                        onClick={() => {
-                          setStatementMonth(alert.statement_month);
-                          document
-                            .getElementById('credit-cards-section')
-                            ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-950/60 px-2.5 py-1 text-xs font-medium text-white transition hover:border-rose-300/60 hover:bg-rose-900/60"
-                      >
-                        <span>
-                          {alert.account_name} · {alert.statement_month} (venció {alert.due_date} ·{' '}
-                          {formatMoney(alert.total_due, alert.currency)})
-                        </span>
-                        <span className="text-[11px] text-rose-300">Ir al resumen →</span>
-                      </button>
-                    ))}
+                    {data.overdueStatements.map((alert) => {
+                      const remaining = alert.remaining_due ?? alert.total_due;
+                      const isPartial = alert.status === 'partial';
+                      return (
+                        <button
+                          key={`${alert.account_id}:${alert.statement_month}`}
+                          type="button"
+                          onClick={() => {
+                            setStatementMonth(alert.statement_month);
+                            document
+                              .getElementById('credit-cards-section')
+                              ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-950/60 px-2.5 py-1 text-xs font-medium text-white transition hover:border-rose-300/60 hover:bg-rose-900/60"
+                        >
+                          <span>
+                            {alert.account_name} · {alert.statement_month} (venció {alert.due_date} ·{' '}
+                            {isPartial ? 'pago parcial · resta ' : ''}
+                            {formatMoney(remaining, alert.currency)})
+                          </span>
+                          <span className="text-[11px] text-rose-300">Ir al resumen →</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </section>

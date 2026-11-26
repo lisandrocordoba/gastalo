@@ -24,6 +24,7 @@ export interface AccountWithBalance {
   color: string;
   is_default: number;
   due_day?: number | null;
+  closing_day?: number | null;
   balance: number;
 }
 
@@ -48,6 +49,7 @@ export interface Transaction {
   currency: string;
   account_id: string;
   to_account_id: string | null;
+  to_amount?: number | null;
   category_id: string | null;
   description: string;
   occurred_at: string;
@@ -137,6 +139,8 @@ export interface OverdueCardAlert {
   statement_month: string;
   due_date: string;
   total_due: number;
+  remaining_due?: number;
+  status?: 'pending' | 'partial';
 }
 
 export interface PaidStatementItem {

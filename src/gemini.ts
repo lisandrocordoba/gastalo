@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import { pickDefaultLiquidAccount } from './db';
 import {
   SUPPORTED_CURRENCIES,
@@ -19,6 +18,7 @@ import {
 } from './types';
 import {
   addMonths,
+  defaultCardStatementMonth,
   defaultColorForAccountType,
   formatCurrency,
   isValidIsoDate,
@@ -102,6 +102,10 @@ const PARSE_SCHEMA = {
             type: ['integer', 'null'],
             description: 'Día de vencimiento (1-31) solo si account_type es credit_card',
           },
+          closing_day: {
+            type: ['integer', 'null'],
+            description: 'Día de cierre (1-31) solo si account_type es credit_card',
+          },
           icon: { type: ['string', 'null'] },
           category_type: {
             type: ['string', 'null'],
@@ -153,6 +157,7 @@ interface RawManageOperation {
   initial_balance?: unknown;
   is_default?: unknown;
   due_day?: unknown;
+  closing_day?: unknown;
   icon?: unknown;
   category_type?: unknown;
   color?: unknown;
@@ -169,7 +174,10 @@ export interface RawParsedIntent {
 export function sanitizeParsedIntent(
   parsed: RawParsedIntent,
   params: {
-    accounts: Pick<AccountWithBalance, 'id' | 'type' | 'currency' | 'is_default'>[];
+    accounts: Pick<
+      AccountWithBalance,
+      'id' | 'type' | 'currency' | 'is_default' | 'closing_day'
+    >[];
     categories: (Pick<Category, 'id'> & { type?: CategoryType })[];
     today: string;
     defaultCurrency?: string;
@@ -208,6 +216,14 @@ export function sanitizeParsedIntent(
           rawOp.due_day <= 31
             ? rawOp.due_day
             : null;
+        const closing_day =
+          account_type === 'credit_card' &&
+          typeof rawOp.closing_day === 'number' &&
+          Number.isInteger(rawOp.closing_day) &&
+          rawOp.closing_day >= 1 &&
+          rawOp.closing_day <= 31
+            ? rawOp.closing_day
+            : null;
         operations.push({
           action: 'create_account',
           name: cleanName,
@@ -216,6 +232,7 @@ export function sanitizeParsedIntent(
           initial_balance,
           is_default,
           due_day,
+          closing_day,
         });
       } else if (rawOp.action === 'create_category') {
         const category_type: CategoryType =
@@ -355,7 +372,10 @@ export function sanitizeParsedIntent(
               ) {
                 first_installment_month = tx.first_installment_month;
               } else {
-                first_installment_month = addMonths(occurred_at.slice(0, 7), 1);
+                first_installment_month = defaultCardStatementMonth(
+                  occurred_at,
+                  chosenAcc.closing_day
+                );
               }
             }
 
@@ -379,7 +399,11 @@ export function sanitizeParsedIntent(
               (type === 'expense' || type === 'third_party') &&
               chosenAcc.type === 'credit_card'
             ) {
-              statement_month = rawStatementMonth;
+              statement_month =
+                rawStatementMonth ??
+                (installments_total === null
+                  ? defaultCardStatementMonth(occurred_at, chosenAcc.closing_day)
+                  : null);
             }
 
             const third_party_name =
@@ -444,6 +468,11 @@ export function sanitizeParsedIntent(
   };
 }
 
+async function createGenAIClient(apiKey: string) {
+  const { GoogleGenAI } = await import('@google/genai');
+  return new GoogleGenAI({ apiKey });
+}
+
 interface ParseInput {
   text?: string;
   media?: { base64: string; mimeType: string; kind: 'audio' | 'image' };
@@ -454,16 +483,23 @@ interface ParseInput {
 }
 
 export async function parseMessageWithGemini(env: Env, params: ParseInput): Promise<ParsedIntent> {
-  const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  const ai = await createGenAIClient(env.GEMINI_API_KEY);
   const defaultCurrency = env.DEFAULT_CURRENCY || 'ARS';
 
   const accountList =
     params.accounts.length > 0
       ? params.accounts
-          .map(
-            (a) =>
-              `- ${a.id}: ${a.name} (${a.type}, ${a.currency}${a.is_default ? ', PRINCIPAL' : ''}${a.type === 'credit_card' && a.due_day ? `, vence día ${a.due_day}` : ''})`
-          )
+          .map((a) => {
+            const cardDetails: string[] = [];
+            if (a.type === 'credit_card' && a.closing_day) {
+              cardDetails.push(`cierra día ${a.closing_day}`);
+            }
+            if (a.type === 'credit_card' && a.due_day) {
+              cardDetails.push(`vence día ${a.due_day}`);
+            }
+            const cardSuffix = cardDetails.length > 0 ? `, ${cardDetails.join(', ')}` : '';
+            return `- ${a.id}: ${a.name} (${a.type}, ${a.currency}${a.is_default ? ', PRINCIPAL' : ''}${cardSuffix})`;
+          })
           .join('\n')
       : '(Todavía no hay cuentas creadas)';
 
@@ -526,7 +562,7 @@ REGLAS PARA CONFIGURACIÓN (intent: "manage", operations: [...]):
 - account_type válidas: "wallet" (billetera/banco), "savings" (ahorro/reservas), "cash" (efectivo), "credit_card" (tarjeta de crédito).
 - Si aclara saldo inicial ("con saldo inicial 50000"), ponerlo en initial_balance.
 - Si pide marcarla como cuenta principal / por defecto, is_default: true (false para tarjetas).
-- Si es tarjeta de crédito y aclara día de vencimiento ("vence el 10"), ponerlo en due_day (1-31).
+- Si es tarjeta de crédito y aclara día de cierre ("cierra el 27") o vencimiento ("vence el 10"), ponerlo en closing_day / due_day (1-31).
 
 REGLAS GENERALES:
 - Si hace una pregunta sobre saldos, gastos, cuotas o resúmenes -> intent: "query", transactions: [], operations: [], y completá transcribed_query con la pregunta exacta del usuario (especialmente para notas de voz). Si no es una consulta, transcribed_query = null.
@@ -602,7 +638,7 @@ export async function answerFinancialQuery(
     defaultCurrency?: string;
   }
 ): Promise<string> {
-  const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  const ai = await createGenAIClient(env.GEMINI_API_KEY);
   const baseCurrency = normalizeCurrency(params.defaultCurrency, 'ARS') ?? 'ARS';
   const accountNameMap = new Map(params.accounts.map((a) => [a.id, a.name]));
 

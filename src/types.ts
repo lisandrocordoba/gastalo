@@ -39,6 +39,7 @@ export interface Account {
   color: string;
   is_default: number;
   due_day?: number | null;
+  closing_day?: number | null;
   created_at: string;
 }
 
@@ -51,10 +52,14 @@ export interface AccountInput {
   color?: string;
   is_default?: number;
   due_day?: number | null;
+  closing_day?: number | null;
 }
 
 export type AccountPatch = Partial<
-  Pick<Account, 'name' | 'type' | 'currency' | 'initial_balance' | 'color' | 'is_default' | 'due_day'>
+  Pick<
+    Account,
+    'name' | 'type' | 'currency' | 'initial_balance' | 'color' | 'is_default' | 'due_day' | 'closing_day'
+  >
 >;
 
 export interface AccountWithBalance extends Account {
@@ -94,6 +99,7 @@ export interface Transaction {
   currency: string;
   account_id: string;
   to_account_id: string | null;
+  to_amount?: number | null;
   category_id: string | null;
   description: string;
   occurred_at: string;
@@ -117,6 +123,7 @@ export interface TransactionInput {
   currency?: string;
   account_id: string;
   to_account_id?: string | null;
+  to_amount?: number | null;
   category_id?: string | null;
   description: string;
   occurred_at: string;
@@ -177,6 +184,7 @@ export type ManageOperation =
       initial_balance: number;
       is_default: boolean;
       due_day: number | null;
+      closing_day?: number | null;
     }
   | {
       action: 'create_category';
@@ -274,6 +282,8 @@ export interface OverdueCardAlert {
   statement_month: string;
   due_date: string;
   total_due: number;
+  remaining_due: number;
+  status: 'pending' | 'partial';
 }
 
 export interface PayStatementInput {
@@ -281,6 +291,7 @@ export interface PayStatementInput {
   statement_month: string;
   from_account_id: string;
   amount: number;
+  source_amount?: number;
   fees_amount?: number;
   occurred_at: string;
   description?: string;

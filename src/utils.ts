@@ -89,13 +89,20 @@ export function formatCurrency(amount: number, currency = 'ARS'): string {
   return `${sign}${prefix} ${formatted}`;
 }
 
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
 export function todayInTimezone(tz = 'America/Argentina/Buenos_Aires'): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
+  let formatter = dateFormatterCache.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    dateFormatterCache.set(tz, formatter);
+  }
+  const parts = formatter.formatToParts(new Date());
   const y = parts.find((p) => p.type === 'year')?.value ?? '2026';
   const m = parts.find((p) => p.type === 'month')?.value ?? '01';
   const d = parts.find((p) => p.type === 'day')?.value ?? '01';
@@ -139,6 +146,24 @@ export function previousMonths(endMonth: string, count: number): string[] {
     result.push(addMonths(endMonth, -i));
   }
   return result;
+}
+
+export function defaultCardStatementMonth(
+  occurredAt: string,
+  closingDay?: number | null
+): string {
+  const ym = occurredAt.slice(0, 7);
+  if (!closingDay || !Number.isInteger(closingDay) || closingDay < 1 || closingDay > 31) {
+    return addMonths(ym, 1);
+  }
+  const [y, m] = ym.split('-').map(Number);
+  const day = Number(occurredAt.slice(8, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(day)) {
+    return addMonths(ym, 1);
+  }
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const effectiveClosingDay = Math.min(closingDay, lastDay);
+  return day <= effectiveClosingDay ? addMonths(ym, 1) : addMonths(ym, 2);
 }
 
 export function slugifyTag(name: string, maxLen = 32): string {

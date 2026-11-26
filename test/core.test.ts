@@ -18,6 +18,7 @@ import type { Account, Category, RecurringItem, Tag, Transaction } from '../src/
 import {
   addMonths,
   arrayBufferToBase64,
+  defaultCardStatementMonth,
   defaultColorForAccountType,
   formatCurrency,
   getMonthDateRange,
@@ -104,6 +105,25 @@ describe('utils', () => {
     expect(defaultColorForAccountType('savings')).toBe('#0EA5E9');
     expect(defaultColorForAccountType('cash')).toBe('#22C55E');
     expect(defaultColorForAccountType('credit_card')).toBe('#18181B');
+  });
+
+  it('defaultCardStatementMonth resolves statement month based on closing_day and month-end clamping', () => {
+    // closing_day: 27 -> before/on 27 goes to M+1, after 27 goes to M+2
+    expect(defaultCardStatementMonth('2026-10-15', 27)).toBe('2026-11');
+    expect(defaultCardStatementMonth('2026-10-27', 27)).toBe('2026-11');
+    expect(defaultCardStatementMonth('2026-10-28', 27)).toBe('2026-12');
+    expect(defaultCardStatementMonth('2026-12-30', 27)).toBe('2027-02');
+
+    // February & 30-day month clamping
+    expect(defaultCardStatementMonth('2026-02-28', 31)).toBe('2026-03');
+    expect(defaultCardStatementMonth('2026-02-28', 25)).toBe('2026-04');
+    expect(defaultCardStatementMonth('2026-04-30', 31)).toBe('2026-05');
+    expect(defaultCardStatementMonth('2026-04-30', 28)).toBe('2026-06');
+
+    // Null/invalid fallback defaults to M+1
+    expect(defaultCardStatementMonth('2026-10-30', null)).toBe('2026-11');
+    expect(defaultCardStatementMonth('2026-10-30', undefined)).toBe('2026-11');
+    expect(defaultCardStatementMonth('2026-10-30', 0)).toBe('2026-11');
   });
 });
 
@@ -476,6 +496,7 @@ describe('agnostic gemini intent sanitization', () => {
             initial_balance: 0,
             is_default: true, // credit cards can never be default
             due_day: 10,
+            closing_day: 25,
           },
           {
             action: 'create_account',
@@ -485,6 +506,7 @@ describe('agnostic gemini intent sanitization', () => {
             initial_balance: 0,
             is_default: false,
             due_day: 15, // ignored for non-card accounts
+            closing_day: 20, // ignored for non-card accounts
           },
           {
             action: 'create_category',
@@ -513,6 +535,7 @@ describe('agnostic gemini intent sanitization', () => {
         initial_balance: 0,
         is_default: false,
         due_day: 10,
+        closing_day: 25,
       },
       {
         action: 'create_account',
@@ -522,6 +545,7 @@ describe('agnostic gemini intent sanitization', () => {
         initial_balance: 0,
         is_default: false,
         due_day: null,
+        closing_day: null,
       },
       {
         action: 'create_category',
@@ -1056,6 +1080,8 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
         statement_month: '2026-11',
         due_date: '2026-11-10',
         total_due: 50000,
+        remaining_due: 50000,
+        status: 'pending',
       },
     ]);
     expect(computeOverdueCardAlerts(cardsWithDue, paidTxs, '2026-11-26')).toEqual([]);
@@ -1089,6 +1115,8 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
         statement_month: '2026-08',
         due_date: '2026-08-10',
         total_due: 12000,
+        remaining_due: 12000,
+        status: 'pending',
       },
     ]);
   });
@@ -1821,5 +1849,269 @@ describe('Lote 2: partial/multiple payments, BRL/USD accounting, recurring match
     const stmts2 = computeCardStatements(accounts, withAi, '2026-05', recurring, '2026-05-05');
     const usdStmt2 = stmts2.find((s) => s.account_id === 'card_usd')!;
     expect(usdStmt2.recurring_items.find((r) => r.recurring_id === 'rec_ai')?.posted_transaction_id).toBe('tx_ai_real');
+  });
+
+  it('assigns statements using card closing_day and reports partial remaining_due in overdue alerts', () => {
+    const cards: Account[] = [
+      { ...accounts[0] },
+      { ...accounts[3], closing_day: 25, due_day: 10 },
+    ];
+    const txs: Transaction[] = [
+      makeTx({
+        id: 'before_close',
+        type: 'expense',
+        amount: 20000,
+        account_id: 'card_ars',
+        category_id: 'compras',
+        description: 'Compra antes cierre',
+        occurred_at: '2026-04-25', // <= 25 -> 2026-05 statement
+      }),
+      makeTx({
+        id: 'after_close',
+        type: 'expense',
+        amount: 35000,
+        account_id: 'card_ars',
+        category_id: 'compras',
+        description: 'Compra después cierre',
+        occurred_at: '2026-04-28', // > 25 -> 2026-06 statement
+      }),
+      makeTx({
+        id: 'partial_may',
+        type: 'transfer',
+        amount: 8000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Pago parcial mayo',
+        occurred_at: '2026-05-08',
+        statement_month: '2026-05',
+      }),
+    ];
+
+    const mayStmt = computeCardStatements(cards, txs, '2026-05', [], '2026-05-12').find(
+      (s) => s.account_id === 'card_ars'
+    )!;
+    expect(mayStmt.total_due).toBe(20000);
+    expect(mayStmt.remaining_due).toBe(12000);
+    expect(mayStmt.status).toBe('partial');
+    expect(mayStmt.is_overdue).toBe(true);
+
+    const junStmt = computeCardStatements(cards, txs, '2026-06', [], '2026-05-12').find(
+      (s) => s.account_id === 'card_ars'
+    )!;
+    expect(junStmt.total_due).toBe(35000);
+    expect(junStmt.items.map((i) => i.transaction_id)).toEqual(['after_close']);
+
+    const alerts = computeOverdueCardAlerts(cards, txs, '2026-05-12');
+    expect(alerts).toEqual([
+      {
+        account_id: 'card_ars',
+        account_name: 'Visa ARS',
+        currency: 'ARS',
+        statement_month: '2026-05',
+        due_date: '2026-05-10',
+        total_due: 20000,
+        remaining_due: 12000,
+        status: 'partial',
+      },
+    ]);
+  });
+
+  it('settles USD credit card statement from ARS wallet via to_amount without double-counting usd_expense', () => {
+    const fxAccounts: Account[] = [
+      { ...accounts[0], initial_balance: 100000 }, // wallet_ars
+      { ...accounts[4], closing_day: 25, due_day: 10 }, // card_usd
+    ];
+    const txs: Transaction[] = [
+      makeTx({
+        id: 'usd_purchase',
+        type: 'expense',
+        amount: 6.69,
+        currency: 'USD',
+        account_id: 'card_usd',
+        category_id: 'servicios',
+        description: 'Cloud Hosting',
+        occurred_at: '2026-10-15',
+        tags: ['viaje'],
+      }),
+      makeTx({
+        id: 'ars_to_usd_card_pay',
+        type: 'transfer',
+        amount: 10350,
+        currency: 'ARS',
+        account_id: 'wallet_ars',
+        to_account_id: 'card_usd',
+        to_amount: 6.69,
+        description: 'Pago resumen Visa USD 2026-11 (US$ 6,69)',
+        occurred_at: '2026-11-10',
+        statement_month: '2026-11',
+      }),
+    ];
+
+    const novSummary = computePeriodMetrics(fxAccounts, txs, categories, tags, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+      statementMonth: '2026-11',
+    });
+
+    const balances = Object.fromEntries(novSummary.accounts.map((a) => [a.id, a.balance]));
+    expect(balances.wallet_ars).toBe(89650);
+    expect(balances.card_usd).toBe(0);
+
+    const usdStmt = novSummary.card_statements.find((s) => s.account_id === 'card_usd')!;
+    expect(usdStmt.status).toBe('paid');
+    expect(usdStmt.paid_amount).toBe(6.69);
+    expect(usdStmt.remaining_due).toBe(0);
+
+    expect(novSummary.expense).toBe(10350);
+    expect(novSummary.usd_expense).toBe(0);
+    expect(novSummary.by_category).toEqual([
+      expect.objectContaining({ category_id: 'servicios', total: 10350 }),
+    ]);
+    expect(novSummary.by_tag).toEqual([
+      expect.objectContaining({ tag_id: 'viaje', total: 10350 }),
+    ]);
+    expect(novSummary.paid_statement_items).toEqual([
+      expect.objectContaining({
+        transaction_id: 'usd_purchase',
+        payment_transaction_id: 'ars_to_usd_card_pay',
+        prorated_amount: 10350,
+        installment_amount: 6.69,
+        currency: 'ARS',
+      }),
+    ]);
+
+    const history = computeMonthlyHistory(fxAccounts, txs, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+    });
+    expect(history.find((h) => h.month === '2026-11')?.expense).toBe(10350);
+  });
+
+  it('computes single-pass overdue card alerts identically across 2,500 synthetic transactions', () => {
+    const bulkTxs: Transaction[] = [];
+    for (let i = 0; i < 2450; i++) {
+      const yr = 2022 + Math.floor(i / 650);
+      const mo = String((i % 12) + 1).padStart(2, '0');
+      const day = String((i % 28) + 1).padStart(2, '0');
+      bulkTxs.push(
+        makeTx({
+          id: `bulk_${i}`,
+          type: i % 9 === 0 ? 'income' : 'expense',
+          amount: 1000 + (i % 500),
+          currency: 'ARS',
+          account_id: 'wallet_ars',
+          category_id: i % 9 === 0 ? 'sueldo' : 'compras',
+          description: `Bulk tx ${i}`,
+          occurred_at: `${yr}-${mo}-${day}`,
+        })
+      );
+    }
+
+    const cards: Account[] = [
+      accounts[0],
+      { ...accounts[3], id: 'card_ars', name: 'Card ARS', due_day: 9, closing_day: 25 },
+      { ...accounts[4], id: 'card_usd', name: 'Card USD', due_day: 12, closing_day: 25 },
+    ];
+
+    bulkTxs.push(
+      // Paid historical statement (2026-04)
+      makeTx({
+        id: 'card_paid_exp',
+        type: 'expense',
+        amount: 20000,
+        account_id: 'card_ars',
+        description: 'Paid historical card purchase',
+        occurred_at: '2026-03-10',
+        statement_month: '2026-04',
+      }),
+      makeTx({
+        id: 'card_paid_pay',
+        type: 'transfer',
+        amount: 20000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Pay April statement',
+        occurred_at: '2026-04-08',
+        statement_month: '2026-04',
+      }),
+      // Partial overdue statement (2026-09): own 30000 + third_party 10000 - paid 14000 = 26000 remaining
+      makeTx({
+        id: 'card_part_own',
+        type: 'expense',
+        amount: 30000,
+        account_id: 'card_ars',
+        description: 'September card own charge',
+        occurred_at: '2026-08-10',
+        statement_month: '2026-09',
+      }),
+      makeTx({
+        id: 'card_part_tp',
+        type: 'third_party',
+        amount: 10000,
+        account_id: 'card_ars',
+        description: 'September card shared charge',
+        occurred_at: '2026-08-11',
+        statement_month: '2026-09',
+        third_party_name: 'Friend',
+      }),
+      makeTx({
+        id: 'card_part_pay',
+        type: 'transfer',
+        amount: 14000,
+        account_id: 'wallet_ars',
+        to_account_id: 'card_ars',
+        description: 'Partial pay September statement',
+        occurred_at: '2026-09-09',
+        statement_month: '2026-09',
+      }),
+      // Pending overdue USD installment starting 2026-11 (overdue as of 2026-11-26)
+      makeTx({
+        id: 'card_usd_inst',
+        type: 'expense',
+        amount: 30,
+        currency: 'USD',
+        account_id: 'card_usd',
+        description: 'USD installment purchase',
+        occurred_at: '2026-10-10',
+        installments_total: 3,
+        first_installment_month: '2026-11',
+      })
+    );
+
+    const today = '2026-11-26';
+    const alerts = computeOverdueCardAlerts(cards, bulkTxs, today);
+    expect(alerts).toEqual([
+      {
+        account_id: 'card_ars',
+        account_name: 'Card ARS',
+        currency: 'ARS',
+        statement_month: '2026-09',
+        due_date: '2026-09-09',
+        total_due: 40000,
+        remaining_due: 26000,
+        status: 'partial',
+      },
+      {
+        account_id: 'card_usd',
+        account_name: 'Card USD',
+        currency: 'USD',
+        statement_month: '2026-11',
+        due_date: '2026-11-12',
+        total_due: 10,
+        remaining_due: 10,
+        status: 'pending',
+      },
+    ]);
+
+    const summary = computePeriodMetrics(cards, bulkTxs, categories, tags, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+      statementMonth: '2026-11',
+      today,
+    });
+    expect(summary.overdue_card_alerts).toEqual(alerts);
   });
 });

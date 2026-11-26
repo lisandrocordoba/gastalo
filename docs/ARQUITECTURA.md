@@ -41,7 +41,7 @@ flowchart LR
 
 ### B. Cloudflare D1 (`migrations/`)
 - Es una base de datos **SQLite administrada en la nube** (`wallet-db`).
-- Incluye [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) (esquema v3 limpio) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) (índices en `to_account_id`, `recurring_items(account_id)` y `telegram_message_id` para deduplicación de webhook).
+- Incluye [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) (esquema v3 limpio), [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) (índices en `to_account_id`, `recurring_items(account_id)` y `telegram_message_id` para deduplicación de webhook) y [`migrations/0003_cards_closing_and_fx.sql`](../migrations/0003_cards_closing_and_fx.sql) (`accounts.closing_day` y `transactions.to_amount`).
 - Tenés **dos bases completamente aisladas**:
   1. **Local** (`.wrangler/state/v3/d1`): vive en tu PC; se usa al correr `npm run dev` y se actualiza con `npm run db:migrate:local`.
   2. **Remota / Producción** (en Cloudflare): vive en la nube; solo cambia si corrés `npm run db:migrate:remote` o si usás la app desplegada.
@@ -100,7 +100,7 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 ### Ciclo obligatorio antes de pasar a producción
 1. **Desarrollar en local:**
    - Correr el entorno local (`npm run dev` + D1 local).
-   - Si hay cambios de esquema, crear una **nueva migración numerada** (`migrations/0003_...sql`, nunca editar `0001_initial.sql` ni `0002_indexes.sql` ya aplicadas) y probarla primero con `npm run db:migrate:local`.
+   - Si hay cambios de esquema, crear una **nueva migración numerada** (`migrations/0004_...sql`, nunca editar migraciones ya aplicadas como `0001_initial.sql` o `0002_indexes.sql`) y probarla primero con `npm run db:migrate:local`.
 2. **Validar calidad antes de cerrar el cambio:**
    - `npm test` (todos los tests unitarios en verde).
    - `npm run build` (compilación de React + chequeo estricto de TypeScript sin errores).
@@ -116,9 +116,9 @@ Para mantener el proyecto ordenado, seguro y evitar despliegues innecesarios a p
 
 ## 6. Modelo de Datos Agnóstico (v3.1)
 
-El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **22 categorías (18 de gasto + 4 de ingreso)** y **5 etiquetas**:
-- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en `ARS`, `USD` o `BRL`, con color propio, flag `is_default` y vencimiento opcional `due_day` para tarjetas.
-- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), cuotas en tarjeta (`installments_total >= 2`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B, con estado `pending`/`partial`/`paid`), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
+El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql), [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) y [`migrations/0003_cards_closing_and_fx.sql`](../migrations/0003_cards_closing_and_fx.sql) inicia **sin cuentas predefinidas** y con una base genérica editable de **22 categorías (18 de gasto + 4 de ingreso)** y **5 etiquetas**:
+- **`accounts`**: cada usuario crea sus propias billeteras/bancos (`wallet`), cuentas de ahorro/reservas (`savings`), efectivo (`cash`) y tarjetas de crédito (`credit_card`) en `ARS`, `USD` o `BRL`, con color propio, flag `is_default`, cierre opcional `closing_day` (imputación por defecto a `mes + 1` / `mes + 2` según cierre) y vencimiento opcional `due_day` para alertas (`OverdueCardAlert` con `remaining_due` y `status`).
+- **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), transferencias y pagos de tarjeta entre monedas distintas (`to_amount` / `source_amount` con imputación `cash` en moneda origen sin doble conteo), cuotas en tarjeta (`installments_total >= 2`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B, con estado `pending`/`partial`/`paid`), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
 - **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales / suscripciones con mes de inicio (`start_month`).
 
 Para el detalle completo de reglas contables, casos de uso y evolución, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md), [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) y [Roadmap y Próximos Pasos](ROADMAP.md).

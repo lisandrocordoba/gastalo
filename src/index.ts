@@ -26,7 +26,7 @@ import {
   listRecurringItems,
   listTags,
   listTransactions,
-  loadAllDataSnapshot,
+  loadBootstrapSnapshot,
   payCardStatement,
   reconcileAccountBalance,
   updateAccount,
@@ -35,7 +35,7 @@ import {
   updateTag,
   updateTransaction,
 } from './db';
-import { handleTelegramUpdate, type TelegramUpdate } from './telegram';
+import type { TelegramUpdate } from './telegram';
 import {
   SUPPORTED_CURRENCIES,
   type Account,
@@ -153,7 +153,9 @@ app.post('/webhook/telegram', async (c) => {
     return c.json({ error: 'Invalid JSON' }, 400);
   }
 
-  c.executionCtx.waitUntil(handleTelegramUpdate(c.env, update));
+  c.executionCtx.waitUntil(
+    import('./telegram').then(({ handleTelegramUpdate }) => handleTelegramUpdate(c.env, update))
+  );
   return c.json({ ok: true });
 });
 
@@ -167,7 +169,8 @@ app.use('/api/*', async (c, next) => {
 
 app.get('/api/bootstrap', async (c) => {
   const tz = c.env.TIMEZONE || 'America/Argentina/Buenos_Aires';
-  const currentMonth = currentMonthInTimezone(tz);
+  const today = todayInTimezone(tz);
+  const currentMonth = today.slice(0, 7);
   const month = parseYearMonthParam(c.req.query('month'), 'month') ?? currentMonth;
   const fallbackRange = getMonthDateRange(month);
   const from = parseIsoDateParam(c.req.query('from'), 'from') ?? fallbackRange.start;
@@ -181,9 +184,12 @@ app.get('/api/bootstrap', async (c) => {
   const nextMonth = addMonths(currentMonth, 1);
 
   const defaultCurrency = normalizeCurrency(c.env.DEFAULT_CURRENCY, 'ARS') ?? 'ARS';
-  const today = todayInTimezone(tz);
 
-  const snapshot = await loadAllDataSnapshot(c.env.DB);
+  const snapshot = await loadBootstrapSnapshot(c.env.DB, {
+    from,
+    to,
+    includeMonthlyHistory: true,
+  });
   const summary = computePeriodMetrics(
     snapshot.accounts,
     snapshot.transactions,
@@ -196,12 +202,15 @@ app.get('/api/bootstrap', async (c) => {
       statementMonth,
       recurringItems: snapshot.recurringItems,
       today,
+      precomputedAccounts: snapshot.accountsWithBalances,
+      precomputedThirdParty: snapshot.thirdParty,
     }
   );
   const monthlyHistory = computeMonthlyHistory(snapshot.accounts, snapshot.transactions, {
     from,
     to,
     basis,
+    precomputedMonthlyRows: snapshot.monthlyHistoryRows,
   });
 
   const matched = snapshot.transactions.filter((tx) => {
@@ -294,6 +303,13 @@ app.post('/api/transactions', async (c) => {
   if (body.type === 'transfer' && (!body.to_account_id || body.to_account_id === body.account_id)) {
     return c.json({ error: 'Cuenta destino inválida para transferencia' }, 400);
   }
+  if (
+    body.to_amount !== undefined &&
+    body.to_amount !== null &&
+    (typeof body.to_amount !== 'number' || !Number.isFinite(body.to_amount) || body.to_amount <= 0)
+  ) {
+    return c.json({ error: 'to_amount inválido' }, 400);
+  }
   if (body.occurred_at !== undefined && (typeof body.occurred_at !== 'string' || !isValidIsoDate(body.occurred_at))) {
     return c.json({ error: 'Fecha inválida (formato esperado YYYY-MM-DD)' }, 400);
   }
@@ -325,6 +341,7 @@ app.post('/api/transactions', async (c) => {
     currency: body.currency && body.currency.trim() ? body.currency : undefined,
     account_id: body.account_id.trim(),
     to_account_id: body.to_account_id ?? null,
+    to_amount: body.to_amount ?? null,
     category_id: body.category_id ?? null,
     description: body.description.trim(),
     occurred_at: body.occurred_at || todayInTimezone(tz),
@@ -405,6 +422,13 @@ app.post('/api/transactions/shared', async (c) => {
 app.patch('/api/transactions/:id', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json<Partial<TransactionInput>>();
+  if (
+    body.to_amount !== undefined &&
+    body.to_amount !== null &&
+    (typeof body.to_amount !== 'number' || !Number.isFinite(body.to_amount) || body.to_amount <= 0)
+  ) {
+    return c.json({ error: 'to_amount inválido' }, 400);
+  }
   const updated = await updateTransaction(c.env.DB, id, body);
   if (!updated) {
     return c.json({ error: 'Movimiento no encontrado' }, 404);
@@ -444,6 +468,13 @@ app.post('/api/accounts', async (c) => {
   ) {
     return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
   }
+  if (
+    body.closing_day !== undefined &&
+    body.closing_day !== null &&
+    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
+  ) {
+    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
+  }
   const currency =
     body.currency !== undefined && body.currency !== null && body.currency.trim() !== ''
       ? normalizeCurrency(body.currency)
@@ -461,6 +492,7 @@ app.post('/api/accounts', async (c) => {
     color: body.color,
     is_default: body.is_default,
     due_day: body.due_day ?? null,
+    closing_day: body.closing_day ?? null,
   });
   const accounts = await listAccountsWithBalances(c.env.DB);
   return c.json({ account, accounts }, 201);
@@ -487,6 +519,13 @@ app.patch('/api/accounts/:id', async (c) => {
     (!Number.isInteger(body.due_day) || body.due_day < 1 || body.due_day > 31)
   ) {
     return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
+  }
+  if (
+    body.closing_day !== undefined &&
+    body.closing_day !== null &&
+    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
+  ) {
+    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
   }
 
   const updated = await updateAccount(c.env.DB, id, body);
@@ -544,6 +583,15 @@ app.post('/api/cards/:id/pay-statement', async (c) => {
       return c.json({ error: 'fees_amount inválido' }, 400);
     }
   }
+  if (body.source_amount !== undefined && body.source_amount !== null) {
+    if (
+      typeof body.source_amount !== 'number' ||
+      !Number.isFinite(body.source_amount) ||
+      body.source_amount <= 0
+    ) {
+      return c.json({ error: 'source_amount inválido' }, 400);
+    }
+  }
   if (body.occurred_at !== undefined && (typeof body.occurred_at !== 'string' || !isValidIsoDate(body.occurred_at))) {
     return c.json({ error: 'Fecha inválida (formato esperado YYYY-MM-DD)' }, 400);
   }
@@ -558,6 +606,7 @@ app.post('/api/cards/:id/pay-statement', async (c) => {
     statement_month: body.statement_month.trim(),
     from_account_id: body.from_account_id || '',
     amount: body.amount,
+    source_amount: typeof body.source_amount === 'number' ? body.source_amount : undefined,
     fees_amount: fees,
     occurred_at: body.occurred_at || todayInTimezone(tz),
     description: body.description,

@@ -35,8 +35,11 @@ import {
 } from './types';
 import {
   addMonths,
+  defaultCardStatementMonth,
   defaultColorForAccountType,
+  formatCurrency,
   getMonthDateRange,
+  isSupportedCurrency,
   isValidIsoDate,
   isValidYearMonth,
   monthDiff,
@@ -133,10 +136,55 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function normalizeDueDay(value: number | null | undefined, type: AccountType): number | null {
+function normalizeCardDay(value: number | null | undefined, type: AccountType): number | null {
   if (type !== 'credit_card') return null;
   if (value === null || value === undefined) return null;
   return Number.isInteger(value) && value >= 1 && value <= 31 ? value : null;
+}
+
+function normalizeDueDay(value: number | null | undefined, type: AccountType): number | null {
+  return normalizeCardDay(value, type);
+}
+
+function normalizeClosingDay(value: number | null | undefined, type: AccountType): number | null {
+  return normalizeCardDay(value, type);
+}
+
+function hasPositiveToAmount(tx: { to_amount?: number | null }): boolean {
+  return typeof tx.to_amount === 'number' && Number.isFinite(tx.to_amount) && tx.to_amount > 0;
+}
+
+function compareAscii(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function filterCardTransactions(
+  cardIds: ReadonlySet<string>,
+  transactions: Transaction[]
+): Transaction[] {
+  if (cardIds.size === 0) return [];
+  return transactions.filter(
+    (tx) =>
+      cardIds.has(tx.account_id) ||
+      (tx.type === 'transfer' && tx.to_account_id !== null && cardIds.has(tx.to_account_id))
+  );
+}
+
+function resolveHistoryMonths(from: string, to: string): string[] {
+  const fromYm = from.slice(0, 7);
+  const toYm = to.slice(0, 7);
+  const diff = monthDiff(fromYm, toYm);
+
+  if (diff <= 0) {
+    return previousMonths(toYm, 6);
+  }
+  const count = Math.min(diff + 1, 24);
+  const startYm = addMonths(toYm, -(count - 1));
+  const months: string[] = [];
+  for (let i = 0; i < count; i++) {
+    months.push(addMonths(startYm, i));
+  }
+  return months;
 }
 
 function resolveDayInMonth(ym: string, day: number): string {
@@ -150,6 +198,7 @@ export function computeAccountBalances(
   accounts: Account[],
   transactions: (Pick<Transaction, 'type' | 'amount' | 'account_id' | 'to_account_id'> & {
     currency?: string;
+    to_amount?: number | null;
   })[]
 ): AccountWithBalance[] {
   const map = new Map<string, number>();
@@ -178,10 +227,12 @@ export function computeAccountBalances(
       }
       if (tx.to_account_id) {
         const dstCurrency = currencyMap.get(tx.to_account_id);
-        const matchesDst =
-          dstCurrency !== undefined && (tx.currency === undefined || tx.currency === dstCurrency);
-        if (matchesDst) {
-          map.set(tx.to_account_id, (map.get(tx.to_account_id) ?? 0) + tx.amount);
+        if (dstCurrency !== undefined) {
+          if (hasPositiveToAmount(tx)) {
+            map.set(tx.to_account_id, (map.get(tx.to_account_id) ?? 0) + tx.to_amount!);
+          } else if (tx.currency === undefined || tx.currency === dstCurrency) {
+            map.set(tx.to_account_id, (map.get(tx.to_account_id) ?? 0) + tx.amount);
+          }
         }
       }
     }
@@ -244,7 +295,8 @@ function extractCardStatementItems(
   cardId: string,
   cardCurrency: string,
   transactions: Transaction[],
-  statementMonth: string
+  statementMonth: string,
+  cardClosingDay?: number | null
 ): CardStatementItem[] {
   const items: CardStatementItem[] = [];
 
@@ -254,7 +306,8 @@ function extractCardStatementItems(
 
     if (tx.installments_total && tx.installments_total >= 2) {
       const firstMonth =
-        normalizeMonth(tx.first_installment_month) ?? addMonths(tx.occurred_at.slice(0, 7), 1);
+        normalizeMonth(tx.first_installment_month) ??
+        defaultCardStatementMonth(tx.occurred_at, cardClosingDay);
       const idx = monthDiff(firstMonth, statementMonth);
       if (idx >= 0 && idx < tx.installments_total) {
         items.push({
@@ -274,7 +327,7 @@ function extractCardStatementItems(
       const dueMonth =
         normalizeMonth(tx.statement_month) ??
         normalizeMonth(tx.first_installment_month) ??
-        addMonths(tx.occurred_at.slice(0, 7), 1);
+        defaultCardStatementMonth(tx.occurred_at, cardClosingDay);
 
       if (dueMonth === statementMonth) {
         items.push({
@@ -301,15 +354,24 @@ export function computeCardStatements(
   transactions: Transaction[],
   statementMonth: string,
   recurringItems: RecurringItem[] = [],
-  today?: string
+  today?: string,
+  precomputedBalanceMap?: ReadonlyMap<string, number>
 ): CardStatement[] {
-  const balances = computeAccountBalances(accounts, transactions);
-  const balanceMap = new Map(balances.map((a) => [a.id, a.balance]));
+  const balanceMap =
+    precomputedBalanceMap ??
+    new Map(computeAccountBalances(accounts, transactions).map((a) => [a.id, a.balance]));
   const cardAccounts = accounts.filter((a) => a.type === 'credit_card');
+  const cardTxs = filterCardTransactions(new Set(cardAccounts.map((a) => a.id)), transactions);
   const todayDate = today ?? todayInTimezone();
 
   return cardAccounts.map((card) => {
-    const items = extractCardStatementItems(card.id, card.currency, transactions, statementMonth);
+    const items = extractCardStatementItems(
+      card.id,
+      card.currency,
+      cardTxs,
+      statementMonth,
+      card.closing_day
+    );
 
     const ownTotal = round2(
       items.filter((i) => i.type === 'expense').reduce((s, i) => s + i.installment_amount, 0)
@@ -319,14 +381,19 @@ export function computeCardStatements(
     );
     const totalDue = round2(ownTotal + thirdPartyTotal);
 
-    const paymentTxs = transactions.filter(
+    const paymentTxs = cardTxs.filter(
       (t) =>
         t.type === 'transfer' &&
         t.to_account_id === card.id &&
         t.statement_month === statementMonth &&
-        t.currency === card.currency
+        (t.currency === card.currency || hasPositiveToAmount(t))
     );
-    const paidAmountSum = round2(paymentTxs.reduce((s, t) => s + t.amount, 0));
+    const paidAmountSum = round2(
+      paymentTxs.reduce(
+        (s, t) => s + (t.currency === card.currency ? t.amount : t.to_amount!),
+        0
+      )
+    );
     const remainingDue = Math.max(0, round2(totalDue - paidAmountSum));
     const isFullyPaid =
       paymentTxs.length > 0 && (totalDue <= 0 || paidAmountSum >= totalDue - 0.01);
@@ -348,7 +415,7 @@ export function computeCardStatements(
             : null;
         const matchedTx =
           needle.length > 0
-            ? transactions.find((tx) => {
+            ? cardTxs.find((tx) => {
                 if (tx.account_id !== card.id || tx.type !== 'expense') return false;
                 if (tx.currency !== r.currency) return false;
                 if (tx.installments_total && tx.installments_total >= 2) return false;
@@ -359,7 +426,7 @@ export function computeCardStatements(
                 const dueMonth =
                   normalizeMonth(tx.statement_month) ??
                   normalizeMonth(tx.first_installment_month) ??
-                  addMonths(tx.occurred_at.slice(0, 7), 1);
+                  defaultCardStatementMonth(tx.occurred_at, card.closing_day);
                 return dueMonth === statementMonth;
               })
             : undefined;
@@ -406,72 +473,116 @@ export function computeCardStatements(
   });
 }
 
+interface OverdueBucket {
+  card: Account;
+  month: string;
+  own: number;
+  third: number;
+  paid: number;
+  paymentCount: number;
+}
+
 export function computeOverdueCardAlerts(
   accounts: Account[],
   transactions: Transaction[],
   today?: string
 ): OverdueCardAlert[] {
-  const dueCardIds = new Set(
-    accounts
-      .filter(
-        (a) =>
-          a.type === 'credit_card' &&
-          a.due_day !== null &&
-          a.due_day !== undefined &&
-          Number.isInteger(a.due_day) &&
-          a.due_day >= 1 &&
-          a.due_day <= 31
-      )
-      .map((a) => a.id)
+  const dueCards = accounts.filter(
+    (a) =>
+      a.type === 'credit_card' &&
+      a.due_day !== null &&
+      a.due_day !== undefined &&
+      Number.isInteger(a.due_day) &&
+      a.due_day >= 1 &&
+      a.due_day <= 31
   );
-  if (dueCardIds.size === 0) return [];
+  if (dueCards.length === 0) return [];
+  const dueCardMap = new Map(dueCards.map((a) => [a.id, a]));
 
   const todayDate = today ?? todayInTimezone();
   const currentYm = todayDate.slice(0, 7);
-  const candidateMonths = new Set<string>([currentYm]);
+  const buckets = new Map<string, OverdueBucket>();
+
+  const getBucket = (card: Account, month: string): OverdueBucket => {
+    const key = `${card.id}:${month}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = { card, month, own: 0, third: 0, paid: 0, paymentCount: 0 };
+      buckets.set(key, b);
+    }
+    return b;
+  };
 
   for (const tx of transactions) {
-    if (!dueCardIds.has(tx.account_id)) continue;
-    if (tx.type !== 'expense' && tx.type !== 'third_party') continue;
+    if (tx.type === 'expense' || tx.type === 'third_party') {
+      const card = dueCardMap.get(tx.account_id);
+      if (!card || tx.currency !== card.currency) continue;
 
-    if (tx.installments_total && tx.installments_total >= 2) {
-      const firstMonth =
-        normalizeMonth(tx.first_installment_month) ?? addMonths(tx.occurred_at.slice(0, 7), 1);
-      for (let i = 0; i < tx.installments_total; i++) {
-        const m = addMonths(firstMonth, i);
-        if (m <= currentYm) {
-          candidateMonths.add(m);
+      if (tx.installments_total && tx.installments_total >= 2) {
+        const firstMonth =
+          normalizeMonth(tx.first_installment_month) ??
+          defaultCardStatementMonth(tx.occurred_at, card.closing_day);
+        if (!isValidYearMonth(firstMonth)) continue;
+        const instAmt = round2(tx.amount / tx.installments_total);
+        for (let i = 0; i < tx.installments_total; i++) {
+          const m = addMonths(firstMonth, i);
+          if (m <= currentYm) {
+            const b = getBucket(card, m);
+            if (tx.type === 'expense') b.own += instAmt;
+            else b.third += instAmt;
+          }
+        }
+      } else {
+        const dueMonth =
+          normalizeMonth(tx.statement_month) ??
+          normalizeMonth(tx.first_installment_month) ??
+          defaultCardStatementMonth(tx.occurred_at, card.closing_day);
+        if (dueMonth && isValidYearMonth(dueMonth) && dueMonth <= currentYm) {
+          const b = getBucket(card, dueMonth);
+          const amt = round2(tx.amount);
+          if (tx.type === 'expense') b.own += amt;
+          else b.third += amt;
         }
       }
-    } else {
-      const dueMonth =
-        normalizeMonth(tx.statement_month) ??
-        normalizeMonth(tx.first_installment_month) ??
-        addMonths(tx.occurred_at.slice(0, 7), 1);
-      if (dueMonth <= currentYm) {
-        candidateMonths.add(dueMonth);
-      }
+    } else if (tx.type === 'transfer' && tx.to_account_id && tx.statement_month) {
+      const card = dueCardMap.get(tx.to_account_id);
+      if (!card || tx.statement_month > currentYm || !isValidYearMonth(tx.statement_month)) continue;
+      if (tx.currency !== card.currency && !hasPositiveToAmount(tx)) continue;
+      const b = getBucket(card, tx.statement_month);
+      b.paid += tx.currency === card.currency ? tx.amount : tx.to_amount!;
+      b.paymentCount++;
     }
   }
 
   const alerts: OverdueCardAlert[] = [];
-  for (const m of Array.from(candidateMonths).sort()) {
-    const statements = computeCardStatements(accounts, transactions, m, [], todayDate);
-    for (const st of statements) {
-      if (st.is_overdue && st.due_date) {
-        alerts.push({
-          account_id: st.account_id,
-          account_name: st.account_name,
-          currency: st.currency,
-          statement_month: st.statement_month,
-          due_date: st.due_date,
-          total_due: st.total_due,
-        });
-      }
-    }
+  for (const b of buckets.values()) {
+    const ownTotal = round2(b.own);
+    const thirdPartyTotal = round2(b.third);
+    const totalDue = round2(ownTotal + thirdPartyTotal);
+    if (totalDue <= 0) continue;
+
+    const paidAmountSum = round2(b.paid);
+    const isFullyPaid = b.paymentCount > 0 && paidAmountSum >= totalDue - 0.01;
+    if (isFullyPaid) continue;
+
+    const dueDate = resolveDayInMonth(b.month, b.card.due_day!);
+    if (todayDate <= dueDate) continue;
+
+    alerts.push({
+      account_id: b.card.id,
+      account_name: b.card.name,
+      currency: b.card.currency,
+      statement_month: b.month,
+      due_date: dueDate,
+      total_due: totalDue,
+      remaining_due: Math.max(0, round2(totalDue - paidAmountSum)),
+      status: b.paymentCount > 0 ? 'partial' : 'pending',
+    });
   }
 
-  alerts.sort((a, b) => a.due_date.localeCompare(b.due_date) || a.account_name.localeCompare(b.account_name));
+  alerts.sort(
+    (a, b) => compareAscii(a.due_date, b.due_date) || a.account_name.localeCompare(b.account_name)
+  );
   return alerts;
 }
 
@@ -493,8 +604,11 @@ function processCardPaymentAllocations(
       card: Account;
       ownItems: CardStatementItem[];
       scale: number;
+      cashFactor: number;
       countedOwn: number;
       extra: number;
+      cashCountedOwn: number;
+      cashExtra: number;
     }) => void;
     onUnallocated: (ctx: { tx: Transaction; effDate: string; card: Account }) => void;
   },
@@ -504,16 +618,17 @@ function processCardPaymentAllocations(
     .filter((tx) => {
       if (tx.type !== 'transfer' || !tx.to_account_id) return false;
       const card = cardAccountMap.get(tx.to_account_id);
-      if (!card || tx.currency !== card.currency) return false;
+      if (!card) return false;
+      if (!isSupportedCurrency(tx.currency)) return false;
       if (currencies && !currencies.has(tx.currency)) return false;
-      return tx.currency === 'ARS' || tx.currency === 'USD' || tx.currency === 'BRL';
+      return tx.currency === card.currency || hasPositiveToAmount(tx);
     })
     .slice()
     .sort(
       (a, b) =>
-        a.occurred_at.localeCompare(b.occurred_at) ||
-        a.created_at.localeCompare(b.created_at) ||
-        a.id.localeCompare(b.id)
+        compareAscii(a.occurred_at, b.occurred_at) ||
+        compareAscii(a.created_at, b.created_at) ||
+        compareAscii(a.id, b.id)
     );
 
   const allocStates = new Map<string, StatementAllocationState | null>();
@@ -521,6 +636,7 @@ function processCardPaymentAllocations(
   for (const tx of cardPaymentTransfers) {
     const effDate = effectiveTransactionDate(tx);
     const card = cardAccountMap.get(tx.to_account_id!)!;
+    const paidCardAmount = tx.currency === card.currency ? tx.amount : tx.to_amount!;
 
     if (tx.statement_month) {
       const key = `${card.id}:${tx.statement_month}`;
@@ -546,13 +662,27 @@ function processCardPaymentAllocations(
       }
 
       if (state) {
-        const thirdAbsorbed = Math.min(state.thirdRemaining, tx.amount);
+        const thirdAbsorbed = Math.min(state.thirdRemaining, paidCardAmount);
         state.thirdRemaining = round2(state.thirdRemaining - thirdAbsorbed);
-        const availableForOwn = round2(tx.amount - thirdAbsorbed);
+        const availableForOwn = round2(paidCardAmount - thirdAbsorbed);
         const countedOwn = Math.min(state.ownRemaining, availableForOwn);
         state.ownRemaining = round2(state.ownRemaining - countedOwn);
         const extra = round2(availableForOwn - countedOwn);
         const scale = state.ownSum > 0 ? countedOwn / state.ownSum : 0;
+
+        const isSameCurrency = tx.currency === card.currency;
+        const cashFactor = isSameCurrency
+          ? 1
+          : paidCardAmount > 0
+            ? tx.amount / paidCardAmount
+            : 0;
+        const cashCountedOwn = isSameCurrency ? countedOwn : round2(countedOwn * cashFactor);
+        let cashExtra = isSameCurrency ? extra : round2(extra * cashFactor);
+        if (!isSameCurrency && extra > 0) {
+          const expectedTotalCash =
+            thirdAbsorbed === 0 ? tx.amount : round2((countedOwn + extra) * cashFactor);
+          cashExtra = Math.max(0, round2(expectedTotalCash - cashCountedOwn));
+        }
 
         handlers.onAllocated({
           tx,
@@ -560,8 +690,11 @@ function processCardPaymentAllocations(
           card,
           ownItems: state.ownItems,
           scale,
+          cashFactor,
           countedOwn,
           extra,
+          cashCountedOwn,
+          cashExtra,
         });
         continue;
       }
@@ -583,6 +716,8 @@ export function computePeriodMetrics(
     statementMonth?: string;
     recurringItems?: RecurringItem[];
     today?: string;
+    precomputedAccounts?: AccountWithBalance[];
+    precomputedThirdParty?: { total_pending: number; by_person: ThirdPartyBalance[] };
   }
 ): MonthSummary {
   const { from, to, basis } = options;
@@ -591,6 +726,7 @@ export function computePeriodMetrics(
   const cardAccounts = accounts.filter((a) => a.type === 'credit_card');
   const cardAccountMap = new Map(cardAccounts.map((a) => [a.id, a]));
   const cardAccountIds = new Set(cardAccounts.map((a) => a.id));
+  const cardTxs = filterCardTransactions(cardAccountIds, transactions);
   const itemCache = new Map<string, CardStatementItem[]>();
   const paidStatementItems: PaidStatementItem[] = [];
 
@@ -598,7 +734,14 @@ export function computePeriodMetrics(
     const key = `${cardId}:${month}`;
     let cached = itemCache.get(key);
     if (!cached) {
-      cached = extractCardStatementItems(cardId, cardCurrency, transactions, month);
+      const card = cardAccountMap.get(cardId);
+      cached = extractCardStatementItems(
+        cardId,
+        cardCurrency,
+        cardTxs,
+        month,
+        card?.closing_day
+      );
       itemCache.set(key, cached);
     }
     return cached;
@@ -649,18 +792,27 @@ export function computePeriodMetrics(
   }
 
   if (basis === 'cash') {
-    processCardPaymentAllocations(cardAccountMap, transactions, getItems, {
-      onAllocated: ({ tx, effDate, card, ownItems, scale, countedOwn, extra }) => {
+    processCardPaymentAllocations(cardAccountMap, cardTxs, getItems, {
+      onAllocated: ({
+        tx,
+        effDate,
+        card,
+        ownItems,
+        scale,
+        cashFactor,
+        cashCountedOwn,
+        cashExtra,
+      }) => {
         if (effDate < from || effDate > to) return;
 
         if (tx.currency === 'USD') {
-          usdExpense += round2(countedOwn + extra);
+          usdExpense += round2(cashCountedOwn + cashExtra);
         } else if (tx.currency === 'BRL') {
-          brlExpense += round2(countedOwn + extra);
+          brlExpense += round2(cashCountedOwn + cashExtra);
         } else if (tx.currency === 'ARS') {
           if (scale > 0) {
             for (const item of ownItems) {
-              const portion = round2(item.installment_amount * scale);
+              const portion = round2(item.installment_amount * scale * cashFactor);
               if (portion <= 0) continue;
               expense += portion;
               const catId = item.category_id ?? 'otros';
@@ -688,9 +840,9 @@ export function computePeriodMetrics(
             }
           }
 
-          if (extra >= 0.01) {
-            expense += extra;
-            catTotals.set('otros', (catTotals.get('otros') ?? 0) + extra);
+          if (cashExtra >= 0.01) {
+            expense += cashExtra;
+            catTotals.set('otros', (catTotals.get('otros') ?? 0) + cashExtra);
           }
         }
       },
@@ -738,16 +890,19 @@ export function computePeriodMetrics(
     })
     .sort((a, b) => b.total - a.total);
 
-  const thirdParty = computeThirdPartyBalances(transactions);
-  const accountsWithBalances = computeAccountBalances(accounts, transactions);
+  const thirdParty = options.precomputedThirdParty ?? computeThirdPartyBalances(transactions);
+  const accountsWithBalances =
+    options.precomputedAccounts ?? computeAccountBalances(accounts, transactions);
+  const balanceMap = new Map(accountsWithBalances.map((a) => [a.id, a.balance]));
   const cardStatements = computeCardStatements(
     accounts,
-    transactions,
+    cardTxs,
     statementMonth,
     recurringItems,
-    options.today
+    options.today,
+    balanceMap
   );
-  const overdueCardAlerts = computeOverdueCardAlerts(accounts, transactions, options.today);
+  const overdueCardAlerts = computeOverdueCardAlerts(accounts, cardTxs, options.today);
 
   return {
     month: from.slice(0, 7),
@@ -775,27 +930,26 @@ export function computePeriodMetrics(
   };
 }
 
+export interface MonthlyHistoryAggregateRow {
+  type: 'income' | 'expense';
+  account_id: string;
+  occ_ym: string;
+  budget_month: string | null;
+  total: number;
+}
+
 export function computeMonthlyHistory(
   accounts: Account[],
   transactions: Transaction[],
-  options: { from: string; to: string; basis?: AccountingBasis }
+  options: {
+    from: string;
+    to: string;
+    basis?: AccountingBasis;
+    precomputedMonthlyRows?: MonthlyHistoryAggregateRow[];
+  }
 ): MonthlyHistoryPoint[] {
   const basis = options.basis ?? 'cash';
-  const fromYm = options.from.slice(0, 7);
-  const toYm = options.to.slice(0, 7);
-  const diff = monthDiff(fromYm, toYm);
-
-  let months: string[];
-  if (diff <= 0) {
-    months = previousMonths(toYm, 6);
-  } else {
-    const count = Math.min(diff + 1, 24);
-    const startYm = addMonths(toYm, -(count - 1));
-    months = [];
-    for (let i = 0; i < count; i++) {
-      months.push(addMonths(startYm, i));
-    }
-  }
+  const months = resolveHistoryMonths(options.from, options.to);
 
   const buckets = new Map<string, { income: number; expense: number }>(
     months.map((m) => [m, { income: 0, expense: 0 }])
@@ -805,28 +959,52 @@ export function computeMonthlyHistory(
   const cardAccountMap = new Map(cardAccounts.map((a) => [a.id, a]));
   const cardAccountIds = new Set(cardAccounts.map((a) => a.id));
 
-  for (const tx of transactions) {
-    if (tx.currency !== 'ARS') continue;
-    if (tx.type !== 'income' && tx.type !== 'expense') continue;
-    const effMonth = effectiveTransactionDate(tx).slice(0, 7);
-    const bucket = buckets.get(effMonth);
-    if (!bucket) continue;
+  if (options.precomputedMonthlyRows) {
+    for (const row of options.precomputedMonthlyRows) {
+      const effMonth =
+        row.budget_month && isValidYearMonth(row.budget_month) ? row.budget_month : row.occ_ym;
+      const bucket = buckets.get(effMonth);
+      if (!bucket) continue;
 
-    if (tx.type === 'income') {
-      bucket.income += tx.amount;
-    } else if (tx.type === 'expense') {
-      if (basis === 'cash' && cardAccountIds.has(tx.account_id)) continue;
-      bucket.expense += tx.amount;
+      if (row.type === 'income') {
+        bucket.income += row.total;
+      } else if (row.type === 'expense') {
+        if (basis === 'cash' && cardAccountIds.has(row.account_id)) continue;
+        bucket.expense += row.total;
+      }
+    }
+  } else {
+    for (const tx of transactions) {
+      if (tx.currency !== 'ARS') continue;
+      if (tx.type !== 'income' && tx.type !== 'expense') continue;
+      const effMonth = effectiveTransactionDate(tx).slice(0, 7);
+      const bucket = buckets.get(effMonth);
+      if (!bucket) continue;
+
+      if (tx.type === 'income') {
+        bucket.income += tx.amount;
+      } else if (tx.type === 'expense') {
+        if (basis === 'cash' && cardAccountIds.has(tx.account_id)) continue;
+        bucket.expense += tx.amount;
+      }
     }
   }
 
   if (basis === 'cash') {
+    const cardTxs = filterCardTransactions(cardAccountIds, transactions);
     const itemCache = new Map<string, CardStatementItem[]>();
     const getItems = (cardId: string, cardCurrency: string, month: string): CardStatementItem[] => {
       const key = `${cardId}:${month}`;
       let cached = itemCache.get(key);
       if (!cached) {
-        cached = extractCardStatementItems(cardId, cardCurrency, transactions, month);
+        const card = cardAccountMap.get(cardId);
+        cached = extractCardStatementItems(
+          cardId,
+          cardCurrency,
+          cardTxs,
+          month,
+          card?.closing_day
+        );
         itemCache.set(key, cached);
       }
       return cached;
@@ -834,22 +1012,22 @@ export function computeMonthlyHistory(
 
     processCardPaymentAllocations(
       cardAccountMap,
-      transactions,
+      cardTxs,
       getItems,
       {
-        onAllocated: ({ effDate, ownItems, scale, extra }) => {
+        onAllocated: ({ effDate, ownItems, scale, cashFactor, cashExtra }) => {
           const bucket = buckets.get(effDate.slice(0, 7));
           if (!bucket) return;
           if (scale > 0) {
             for (const item of ownItems) {
-              const portion = round2(item.installment_amount * scale);
+              const portion = round2(item.installment_amount * scale * cashFactor);
               if (portion > 0) {
                 bucket.expense += portion;
               }
             }
           }
-          if (extra >= 0.01) {
-            bucket.expense += extra;
+          if (cashExtra >= 0.01) {
+            bucket.expense += cashExtra;
           }
         },
         onUnallocated: ({ tx, effDate }) => {
@@ -891,27 +1069,31 @@ export function computeFutureProjection(
   const activeRecurringBrl = recurringItems.filter(
     (item) => item.active === 1 && item.type === 'expense' && item.currency === 'BRL'
   );
+  const installmentTxs = transactions.filter(
+    (tx) =>
+      tx.currency === 'ARS' &&
+      (tx.type === 'expense' || tx.type === 'third_party') &&
+      tx.installments_total !== null &&
+      tx.installments_total >= 2 &&
+      tx.first_installment_month !== null &&
+      isValidYearMonth(tx.first_installment_month)
+  );
 
   const months: MonthProjection[] = [];
   for (let i = 0; i < monthsAhead; i++) {
     const targetMonth = addMonths(startMonth, i);
     const installments: ProjectedInstallment[] = [];
 
-    for (const tx of transactions) {
-      if (tx.currency !== 'ARS') continue;
-      if (tx.type !== 'expense' && tx.type !== 'third_party') continue;
-      if (!tx.installments_total || tx.installments_total < 2 || !tx.first_installment_month) continue;
-      if (!isValidYearMonth(tx.first_installment_month)) continue;
-
-      const idx = monthDiff(tx.first_installment_month, targetMonth);
-      if (idx >= 0 && idx < tx.installments_total) {
+    for (const tx of installmentTxs) {
+      const idx = monthDiff(tx.first_installment_month!, targetMonth);
+      if (idx >= 0 && idx < tx.installments_total!) {
         installments.push({
           transaction_id: tx.id,
           description: tx.description,
           account_id: tx.account_id,
           installment_number: idx + 1,
-          installments_total: tx.installments_total,
-          installment_amount: round2(tx.amount / tx.installments_total),
+          installments_total: tx.installments_total!,
+          installment_amount: round2(tx.amount / tx.installments_total!),
           third_party_name: tx.third_party_name,
         });
       }
@@ -996,6 +1178,115 @@ async function hydrateTransactionTags(
   }));
 }
 
+function hydrateRowsWithTagRows(
+  rows: RawTransactionRow[],
+  tagRows: Array<{ transaction_id: string; tag_id: string }>
+): Transaction[] {
+  const tagMap = new Map<string, string[]>();
+  for (const rel of tagRows) {
+    let list = tagMap.get(rel.transaction_id);
+    if (!list) {
+      list = [];
+      tagMap.set(rel.transaction_id, list);
+    }
+    list.push(rel.tag_id);
+  }
+  return rows.map((row) => ({
+    ...row,
+    tags: tagMap.get(row.id) ?? [],
+  }));
+}
+
+interface AccountSourceDeltaRow {
+  account_id: string;
+  currency: string;
+  delta: number | null;
+}
+
+interface AccountTransferCreditRow {
+  account_id: string;
+  currency: string;
+  fx_credit: number | null;
+  same_ccy_credit: number | null;
+}
+
+const SQL_ACCOUNT_SOURCE_DELTAS = `
+  SELECT account_id, currency,
+    SUM(CASE
+      WHEN type IN ('income', 'third_party_repayment', 'adjustment') THEN amount
+      WHEN type IN ('expense', 'investment', 'third_party', 'transfer') THEN -amount
+      ELSE 0
+    END) AS delta
+  FROM transactions
+  GROUP BY account_id, currency
+`;
+
+const SQL_ACCOUNT_TRANSFER_CREDITS = `
+  SELECT to_account_id AS account_id, currency,
+    SUM(CASE WHEN to_amount IS NOT NULL AND to_amount > 0 THEN to_amount ELSE 0 END) AS fx_credit,
+    SUM(CASE WHEN to_amount IS NULL OR to_amount <= 0 THEN amount ELSE 0 END) AS same_ccy_credit
+  FROM transactions
+  WHERE type = 'transfer' AND to_account_id IS NOT NULL
+  GROUP BY to_account_id, currency
+`;
+
+const SQL_CARD_TX_PREDICATE = `(
+  account_id IN (SELECT id FROM accounts WHERE type = 'credit_card')
+  OR (type = 'transfer' AND to_account_id IN (SELECT id FROM accounts WHERE type = 'credit_card'))
+)`;
+
+const SQL_BOOTSTRAP_TX_PREDICATE = `(
+  (occurred_at >= ? AND occurred_at <= ?)
+  OR (budget_month >= ? AND budget_month <= ?)
+  OR ${SQL_CARD_TX_PREDICATE}
+  OR installments_total >= 2
+)`;
+
+const SQL_MONTHLY_HISTORY_AGGREGATES = `
+  SELECT type, account_id, substr(occurred_at, 1, 7) AS occ_ym, budget_month, SUM(amount) AS total
+  FROM transactions
+  WHERE currency = 'ARS' AND type IN ('income', 'expense')
+    AND ((occurred_at >= ? AND occurred_at <= ?) OR (budget_month >= ? AND budget_month <= ?))
+  GROUP BY type, account_id, occ_ym, budget_month
+`;
+
+function buildAccountsWithBalancesFromDeltas(
+  accounts: Account[],
+  srcDeltas: AccountSourceDeltaRow[],
+  transferCredits: AccountTransferCreditRow[]
+): AccountWithBalance[] {
+  const balanceMap = new Map<string, number>();
+  const currencyMap = new Map<string, string>();
+  for (const acc of accounts) {
+    balanceMap.set(acc.id, acc.initial_balance);
+    currencyMap.set(acc.id, acc.currency);
+  }
+
+  for (const row of srcDeltas) {
+    if (currencyMap.get(row.account_id) === row.currency) {
+      balanceMap.set(
+        row.account_id,
+        (balanceMap.get(row.account_id) ?? 0) + Number(row.delta ?? 0)
+      );
+    }
+  }
+
+  for (const row of transferCredits) {
+    const dstCurrency = currencyMap.get(row.account_id);
+    if (dstCurrency === undefined) continue;
+    let credit = Number(row.fx_credit ?? 0);
+    if (dstCurrency === row.currency) {
+      credit += Number(row.same_ccy_credit ?? 0);
+    }
+    balanceMap.set(row.account_id, (balanceMap.get(row.account_id) ?? 0) + credit);
+  }
+
+  return accounts.map((acc) => ({
+    ...acc,
+    balance: round2(balanceMap.get(acc.id) ?? acc.initial_balance),
+  }));
+}
+
 export async function loadAllDataSnapshot(db: D1Database): Promise<{
   accounts: Account[];
   categories: Category[];
@@ -1012,17 +1303,10 @@ export async function loadAllDataSnapshot(db: D1Database): Promise<{
     db.prepare('SELECT * FROM recurring_items ORDER BY active DESC, day_of_month ASC, name ASC'),
   ]);
 
-  const tagMap = new Map<string, string[]>();
-  for (const rel of (ttRes.results ?? []) as Array<{ transaction_id: string; tag_id: string }>) {
-    const list = tagMap.get(rel.transaction_id) ?? [];
-    list.push(rel.tag_id);
-    tagMap.set(rel.transaction_id, list);
-  }
-
-  const transactions: Transaction[] = ((txRes.results ?? []) as RawTransactionRow[]).map((row) => ({
-    ...row,
-    tags: tagMap.get(row.id) ?? [],
-  }));
+  const transactions = hydrateRowsWithTagRows(
+    (txRes.results ?? []) as RawTransactionRow[],
+    (ttRes.results ?? []) as Array<{ transaction_id: string; tag_id: string }>
+  );
 
   return {
     accounts: (accRes.results ?? []) as Account[],
@@ -1030,6 +1314,92 @@ export async function loadAllDataSnapshot(db: D1Database): Promise<{
     tags: (tagRes.results ?? []) as Tag[],
     transactions,
     recurringItems: (recRes.results ?? []) as RecurringItem[],
+  };
+}
+
+export async function loadBootstrapSnapshot(
+  db: D1Database,
+  options: {
+    from: string;
+    to: string;
+    includeMonthlyHistory?: boolean;
+  }
+): Promise<{
+  accounts: Account[];
+  accountsWithBalances: AccountWithBalance[];
+  categories: Category[];
+  tags: Tag[];
+  recurringItems: RecurringItem[];
+  transactions: Transaction[];
+  thirdParty: { total_pending: number; by_person: ThirdPartyBalance[] };
+  monthlyHistoryRows: MonthlyHistoryAggregateRow[];
+}> {
+  const fromYm = options.from.slice(0, 7);
+  const toYm = options.to.slice(0, 7);
+  const includeMonthly = options.includeMonthlyHistory !== false;
+
+  const stmts: D1PreparedStatement[] = [
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC'),
+    db.prepare('SELECT * FROM categories ORDER BY type ASC, name ASC'),
+    db.prepare('SELECT * FROM tags ORDER BY name ASC'),
+    db.prepare('SELECT * FROM recurring_items ORDER BY active DESC, day_of_month ASC, name ASC'),
+    db.prepare(SQL_ACCOUNT_SOURCE_DELTAS),
+    db.prepare(SQL_ACCOUNT_TRANSFER_CREDITS),
+    db.prepare(
+      "SELECT type, amount, third_party_name FROM transactions WHERE type IN ('third_party', 'third_party_repayment')"
+    ),
+    db
+      .prepare(
+        `SELECT * FROM transactions WHERE ${SQL_BOOTSTRAP_TX_PREDICATE} ORDER BY occurred_at DESC, created_at DESC`
+      )
+      .bind(options.from, options.to, fromYm, toYm),
+    db
+      .prepare(
+        `SELECT tt.transaction_id, tt.tag_id FROM transaction_tags tt WHERE tt.transaction_id IN (SELECT id FROM transactions WHERE ${SQL_BOOTSTRAP_TX_PREDICATE}) ORDER BY tt.tag_id ASC`
+      )
+      .bind(options.from, options.to, fromYm, toYm),
+  ];
+
+  if (includeMonthly) {
+    const months = resolveHistoryMonths(options.from, options.to);
+    const histStartYm = months[0];
+    const histEndYm = months[months.length - 1];
+    const histStartDate = `${histStartYm}-01`;
+    const histEndDate = getMonthDateRange(histEndYm).end;
+    stmts.push(
+      db
+        .prepare(SQL_MONTHLY_HISTORY_AGGREGATES)
+        .bind(histStartDate, histEndDate, histStartYm, histEndYm)
+    );
+  }
+
+  const results = await db.batch(stmts);
+  const accounts = (results[0].results ?? []) as Account[];
+  const accountsWithBalances = buildAccountsWithBalancesFromDeltas(
+    accounts,
+    (results[4].results ?? []) as AccountSourceDeltaRow[],
+    (results[5].results ?? []) as AccountTransferCreditRow[]
+  );
+  const thirdParty = computeThirdPartyBalances(
+    (results[6].results ?? []) as Pick<Transaction, 'type' | 'amount' | 'third_party_name'>[]
+  );
+  const transactions = hydrateRowsWithTagRows(
+    (results[7].results ?? []) as RawTransactionRow[],
+    (results[8].results ?? []) as Array<{ transaction_id: string; tag_id: string }>
+  );
+  const monthlyHistoryRows = includeMonthly
+    ? ((results[9].results ?? []) as MonthlyHistoryAggregateRow[])
+    : [];
+
+  return {
+    accounts,
+    accountsWithBalances,
+    categories: (results[1].results ?? []) as Category[],
+    tags: (results[2].results ?? []) as Tag[],
+    recurringItems: (results[3].results ?? []) as RecurringItem[],
+    transactions,
+    thirdParty,
+    monthlyHistoryRows,
   };
 }
 
@@ -1108,14 +1478,17 @@ async function generateUniqueId(
 }
 
 export async function listAccountsWithBalances(db: D1Database): Promise<AccountWithBalance[]> {
-  const [accRes, txRes] = await Promise.all([
-    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC').all<Account>(),
-    db
-      .prepare('SELECT type, amount, currency, account_id, to_account_id FROM transactions')
-      .all<Pick<Transaction, 'type' | 'amount' | 'currency' | 'account_id' | 'to_account_id'>>(),
+  const [accRes, srcRes, creditRes] = await db.batch([
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC'),
+    db.prepare(SQL_ACCOUNT_SOURCE_DELTAS),
+    db.prepare(SQL_ACCOUNT_TRANSFER_CREDITS),
   ]);
 
-  return computeAccountBalances(accRes.results ?? [], txRes.results ?? []);
+  return buildAccountsWithBalancesFromDeltas(
+    (accRes.results ?? []) as Account[],
+    (srcRes.results ?? []) as AccountSourceDeltaRow[],
+    (creditRes.results ?? []) as AccountTransferCreditRow[]
+  );
 }
 
 export async function createAccount(db: D1Database, input: AccountInput): Promise<AccountWithBalance> {
@@ -1155,13 +1528,25 @@ export async function createAccount(db: D1Database, input: AccountInput): Promis
   }
 
   const dueDay = normalizeDueDay(input.due_day, input.type);
+  const closingDay = normalizeClosingDay(input.closing_day, input.type);
 
   await db
     .prepare(
-      `INSERT INTO accounts (id, name, type, currency, initial_balance, color, is_default, due_day, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (id, name, type, currency, initial_balance, color, is_default, due_day, closing_day, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(id, cleanName, input.type, currency, initialBalance, color, isDefault, dueDay, createdAt)
+    .bind(
+      id,
+      cleanName,
+      input.type,
+      currency,
+      initialBalance,
+      color,
+      isDefault,
+      dueDay,
+      closingDay,
+      createdAt
+    )
     .run();
 
   const accounts = await listAccountsWithBalances(db);
@@ -1232,14 +1617,28 @@ export async function updateAccount(
     patch.due_day !== undefined
       ? normalizeDueDay(patch.due_day, nextType)
       : normalizeDueDay(existing.due_day ?? null, nextType);
+  const nextClosingDay =
+    patch.closing_day !== undefined
+      ? normalizeClosingDay(patch.closing_day, nextType)
+      : normalizeClosingDay(existing.closing_day ?? null, nextType);
 
   await db
     .prepare(
       `UPDATE accounts
-       SET name = ?, type = ?, currency = ?, initial_balance = ?, color = ?, is_default = ?, due_day = ?
+       SET name = ?, type = ?, currency = ?, initial_balance = ?, color = ?, is_default = ?, due_day = ?, closing_day = ?
        WHERE id = ?`
     )
-    .bind(nextName, nextType, nextCurrency, nextInitial, nextColor, nextIsDefault, nextDueDay, id)
+    .bind(
+      nextName,
+      nextType,
+      nextCurrency,
+      nextInitial,
+      nextColor,
+      nextIsDefault,
+      nextDueDay,
+      nextClosingDay,
+      id
+    )
     .run();
 
   if (existing.is_default === 1 && nextIsDefault === 0) {
@@ -1381,21 +1780,42 @@ export async function payCardStatement(
     if (!fromAcc) {
       throw new ValidationError('La cuenta origen seleccionada no existe o es una tarjeta de crédito');
     }
-    if (fromAcc.currency !== card.currency) {
-      throw new ValidationError(
-        `La cuenta origen (${fromAcc.currency}) debe tener la misma moneda que la tarjeta (${card.currency})`
-      );
-    }
   } else {
-    fromAcc = pickDefaultLiquidAccount(allAccounts, card.currency) ?? undefined;
-    if (!fromAcc) {
+    const candidate = pickDefaultLiquidAccount(allAccounts, card.currency) ?? undefined;
+    if (!candidate) {
       throw new ValidationError('Creá al menos una cuenta líquida antes de registrar el pago del resumen.');
     }
-    if (fromAcc.currency !== card.currency) {
+    if (
+      candidate.currency !== card.currency &&
+      !(
+        typeof input.source_amount === 'number' &&
+        Number.isFinite(input.source_amount) &&
+        input.source_amount > 0
+      )
+    ) {
       throw new ValidationError(
         `No tenés una cuenta líquida en ${card.currency} para pagar esta tarjeta.`
       );
     }
+    fromAcc = candidate;
+  }
+
+  const totalCardSettled = round2(roundedBase + feesAmount);
+  const isCrossCurrency = fromAcc.currency !== card.currency;
+  let transferAmount = totalCardSettled;
+  let transferCurrency = card.currency;
+  let transferToAmount: number | null = null;
+
+  if (isCrossCurrency) {
+    const rawSource = input.source_amount;
+    if (typeof rawSource !== 'number' || !Number.isFinite(rawSource) || rawSource <= 0) {
+      throw new ValidationError(
+        'Al pagar una tarjeta en otra moneda debés ingresar el monto debitado en moneda origen (source_amount).'
+      );
+    }
+    transferAmount = round2(rawSource);
+    transferCurrency = fromAcc.currency;
+    transferToAmount = totalCardSettled;
   }
 
   const createdAt = new Date().toISOString();
@@ -1411,10 +1831,10 @@ export async function payCardStatement(
       db
         .prepare(
           `INSERT INTO transactions (
-            id, type, amount, currency, account_id, to_account_id, category_id,
+            id, type, amount, currency, account_id, to_account_id, to_amount, category_id,
             description, occurred_at, source, raw_input, telegram_message_id,
             installments_total, first_installment_month, statement_month, budget_month, third_party_name, linked_group_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           feesId,
@@ -1422,6 +1842,7 @@ export async function payCardStatement(
           feesAmount,
           card.currency,
           card.id,
+          null,
           null,
           feesCategoryId,
           feesDesc,
@@ -1445,6 +1866,7 @@ export async function payCardStatement(
       currency: card.currency,
       account_id: card.id,
       to_account_id: null,
+      to_amount: null,
       category_id: feesCategoryId,
       description: feesDesc,
       occurred_at: input.occurred_at,
@@ -1462,26 +1884,29 @@ export async function payCardStatement(
     };
   }
 
-  const totalPaid = round2(roundedBase + feesAmount);
   const transferId = shortId();
   const transferDesc =
-    input.description?.trim() || `Pago resumen ${card.name} ${input.statement_month}`;
+    input.description?.trim() ||
+    (isCrossCurrency
+      ? `Pago resumen ${card.name} ${input.statement_month} (${formatCurrency(totalCardSettled, card.currency)})`
+      : `Pago resumen ${card.name} ${input.statement_month}`);
   stmts.push(
     db
       .prepare(
         `INSERT INTO transactions (
-          id, type, amount, currency, account_id, to_account_id, category_id,
+          id, type, amount, currency, account_id, to_account_id, to_amount, category_id,
           description, occurred_at, source, raw_input, telegram_message_id,
           installments_total, first_installment_month, statement_month, budget_month, third_party_name, linked_group_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         transferId,
         'transfer',
-        totalPaid,
-        card.currency,
+        transferAmount,
+        transferCurrency,
         fromAcc.id,
         card.id,
+        transferToAmount,
         null,
         transferDesc,
         input.occurred_at,
@@ -1503,10 +1928,11 @@ export async function payCardStatement(
   const transfer: Transaction = {
     id: transferId,
     type: 'transfer',
-    amount: totalPaid,
-    currency: card.currency,
+    amount: transferAmount,
+    currency: transferCurrency,
     account_id: fromAcc.id,
     to_account_id: card.id,
+    to_amount: transferToAmount,
     category_id: null,
     description: transferDesc,
     occurred_at: input.occurred_at,
@@ -1523,12 +1949,42 @@ export async function payCardStatement(
     created_at: createdAt,
   };
 
-  const { accounts, transactions, recurringItems } = await loadAllDataSnapshot(db);
+  const [snapAccRes, srcRes, creditRes, cardTxRes, cardTagRes, recRes] = await db.batch([
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC'),
+    db.prepare(SQL_ACCOUNT_SOURCE_DELTAS),
+    db.prepare(SQL_ACCOUNT_TRANSFER_CREDITS),
+    db.prepare(
+      `SELECT * FROM transactions WHERE ${SQL_CARD_TX_PREDICATE} ORDER BY occurred_at DESC, created_at DESC`
+    ),
+    db.prepare(
+      `SELECT tt.transaction_id, tt.tag_id FROM transaction_tags tt WHERE tt.transaction_id IN (SELECT id FROM transactions WHERE ${SQL_CARD_TX_PREDICATE}) ORDER BY tt.tag_id ASC`
+    ),
+    db.prepare('SELECT * FROM recurring_items ORDER BY active DESC, day_of_month ASC, name ASC'),
+  ]);
+  const accounts = (snapAccRes.results ?? []) as Account[];
+  const accountsWithBalances = buildAccountsWithBalancesFromDeltas(
+    accounts,
+    (srcRes.results ?? []) as AccountSourceDeltaRow[],
+    (creditRes.results ?? []) as AccountTransferCreditRow[]
+  );
+  const balanceMap = new Map(accountsWithBalances.map((a) => [a.id, a.balance]));
+  const cardTransactions = hydrateRowsWithTagRows(
+    (cardTxRes.results ?? []) as RawTransactionRow[],
+    (cardTagRes.results ?? []) as Array<{ transaction_id: string; tag_id: string }>
+  );
+  const recurringItems = (recRes.results ?? []) as RecurringItem[];
   return {
     transfer,
     feesTx,
-    accounts: computeAccountBalances(accounts, transactions),
-    cardStatements: computeCardStatements(accounts, transactions, input.statement_month, recurringItems),
+    accounts: accountsWithBalances,
+    cardStatements: computeCardStatements(
+      accounts,
+      cardTransactions,
+      input.statement_month,
+      recurringItems,
+      undefined,
+      balanceMap
+    ),
   };
 }
 
@@ -1641,6 +2097,59 @@ export async function deleteTag(db: D1Database, id: string): Promise<boolean> {
   return (res.meta.changes ?? 0) > 0;
 }
 
+async function resolveTransferDestination(
+  db: D1Database,
+  params: {
+    fromAccountId: string;
+    fromCurrency: string;
+    toAccountId: string | null | undefined;
+    amount: number;
+    toAmountInput: number | null | undefined;
+    enforceSameCurrencyToAmount: boolean;
+  }
+): Promise<{ toAccountId: string; toAmount: number | null }> {
+  if (!params.toAccountId || params.toAccountId === params.fromAccountId) {
+    throw new ValidationError('Cuenta destino inválida para transferencia');
+  }
+  const toAcc = await db
+    .prepare('SELECT * FROM accounts WHERE id = ?')
+    .bind(params.toAccountId)
+    .first<Account>();
+  if (!toAcc) {
+    throw new ValidationError('La cuenta destino no existe');
+  }
+  if (toAcc.currency === params.fromCurrency) {
+    if (
+      params.enforceSameCurrencyToAmount &&
+      params.toAmountInput !== undefined &&
+      params.toAmountInput !== null
+    ) {
+      const parsed = Number(params.toAmountInput);
+      if (
+        !Number.isFinite(parsed) ||
+        parsed <= 0 ||
+        Math.abs(round2(parsed) - params.amount) > 0.01
+      ) {
+        throw new ValidationError(
+          'En transferencias en la misma moneda, to_amount debe coincidir con el monto o quedar vacío'
+        );
+      }
+    }
+    return { toAccountId: toAcc.id, toAmount: null };
+  }
+
+  const parsedToAmount =
+    params.toAmountInput !== undefined && params.toAmountInput !== null
+      ? Number(params.toAmountInput)
+      : NaN;
+  if (!Number.isFinite(parsedToAmount) || parsedToAmount <= 0) {
+    throw new ValidationError(
+      'En transferencias entre distintas monedas debés indicar el monto recibido (to_amount).'
+    );
+  }
+  return { toAccountId: toAcc.id, toAmount: round2(parsedToAmount) };
+}
+
 export async function createTransaction(db: D1Database, input: TransactionInput): Promise<Transaction> {
   if (!VALID_TX_TYPES.has(input.type)) {
     throw new ValidationError('Tipo de movimiento inválido');
@@ -1683,23 +2192,18 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
   const currency = account.currency;
 
   let toAccountId: string | null = null;
+  let toAmount: number | null = null;
   if (input.type === 'transfer') {
-    if (!input.to_account_id || input.to_account_id === input.account_id) {
-      throw new ValidationError('Cuenta destino inválida para transferencia');
-    }
-    const toAcc = await db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .bind(input.to_account_id)
-      .first<Account>();
-    if (!toAcc) {
-      throw new ValidationError('La cuenta destino no existe');
-    }
-    if (toAcc.currency !== currency) {
-      throw new ValidationError(
-        `La cuenta destino (${toAcc.currency}) debe tener la misma moneda que la cuenta origen (${currency})`
-      );
-    }
-    toAccountId = toAcc.id;
+    const resolved = await resolveTransferDestination(db, {
+      fromAccountId: input.account_id,
+      fromCurrency: currency,
+      toAccountId: input.to_account_id,
+      amount,
+      toAmountInput: input.to_amount,
+      enforceSameCurrencyToAmount: true,
+    });
+    toAccountId = resolved.toAccountId;
+    toAmount = resolved.toAmount;
   }
 
   let budgetMonth: string | null = null;
@@ -1739,7 +2243,7 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
 
   const defaultFirstMonth =
     account.type === 'credit_card'
-      ? addMonths(input.occurred_at.slice(0, 7), 1)
+      ? defaultCardStatementMonth(input.occurred_at, account.closing_day)
       : input.occurred_at.slice(0, 7);
   const firstInstallmentMonth = installmentsTotal
     ? (normalizeMonth(input.first_installment_month) ?? defaultFirstMonth)
@@ -1754,10 +2258,10 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
   await db
     .prepare(
       `INSERT INTO transactions (
-        id, type, amount, currency, account_id, to_account_id, category_id,
+        id, type, amount, currency, account_id, to_account_id, to_amount, category_id,
         description, occurred_at, source, raw_input, telegram_message_id,
         installments_total, first_installment_month, statement_month, budget_month, third_party_name, linked_group_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -1766,6 +2270,7 @@ export async function createTransaction(db: D1Database, input: TransactionInput)
       currency,
       input.account_id,
       toAccountId,
+      toAmount,
       categoryId,
       description,
       input.occurred_at,
@@ -1865,7 +2370,7 @@ export async function createSharedPurchase(
       : null;
   const defaultFirstMonth =
     account.type === 'credit_card'
-      ? addMonths(input.occurred_at.slice(0, 7), 1)
+      ? defaultCardStatementMonth(input.occurred_at, account.closing_day)
       : input.occurred_at.slice(0, 7);
   const firstInstallmentMonth = installmentsTotal
     ? (normalizeMonth(input.first_installment_month) ?? defaultFirstMonth)
@@ -1937,6 +2442,7 @@ export async function createSharedPurchase(
       currency,
       account_id: account.id,
       to_account_id: null,
+      to_amount: null,
       category_id: params.category_id,
       description: params.desc,
       occurred_at: input.occurred_at,
@@ -2020,6 +2526,7 @@ export async function updateTransaction(
       | 'currency'
       | 'account_id'
       | 'to_account_id'
+      | 'to_amount'
       | 'category_id'
       | 'description'
       | 'occurred_at'
@@ -2084,25 +2591,22 @@ export async function updateTransaction(
   }
 
   let nextToAccountId: string | null = null;
+  let nextToAmount: number | null = null;
   if (nextType === 'transfer') {
     const candidateToId =
       patch.to_account_id !== undefined ? patch.to_account_id : existing.to_account_id;
-    if (!candidateToId || candidateToId === nextAccountId) {
-      throw new ValidationError('Cuenta destino inválida para transferencia');
-    }
-    const toAcc = await db
-      .prepare('SELECT * FROM accounts WHERE id = ?')
-      .bind(candidateToId)
-      .first<Account>();
-    if (!toAcc) {
-      throw new ValidationError('La cuenta destino no existe');
-    }
-    if (toAcc.currency !== nextCurrency) {
-      throw new ValidationError(
-        `La cuenta destino (${toAcc.currency}) debe tener la misma moneda que la cuenta origen (${nextCurrency})`
-      );
-    }
-    nextToAccountId = toAcc.id;
+    const candidateToAmount =
+      patch.to_amount !== undefined ? patch.to_amount : existing.to_amount;
+    const resolved = await resolveTransferDestination(db, {
+      fromAccountId: nextAccountId,
+      fromCurrency: nextCurrency,
+      toAccountId: candidateToId,
+      amount: nextAmount,
+      toAmountInput: candidateToAmount,
+      enforceSameCurrencyToAmount: patch.to_amount !== undefined,
+    });
+    nextToAccountId = resolved.toAccountId;
+    nextToAmount = resolved.toAmount;
   }
 
   const allowsCategory = nextType === 'expense' || nextType === 'income';
@@ -2133,7 +2637,7 @@ export async function updateTransaction(
       : existing.first_installment_month;
   const defaultFirstMonth =
     targetAcc.type === 'credit_card'
-      ? addMonths(nextOccurredAt.slice(0, 7), 1)
+      ? defaultCardStatementMonth(nextOccurredAt, targetAcc.closing_day)
       : nextOccurredAt.slice(0, 7);
   const nextFirstInstallmentMonth = nextInstallmentsTotal
     ? (normalizeMonth(rawFirstMonth) ?? defaultFirstMonth)
@@ -2168,7 +2672,7 @@ export async function updateTransaction(
   await db
     .prepare(
       `UPDATE transactions
-       SET type = ?, amount = ?, currency = ?, account_id = ?, to_account_id = ?,
+       SET type = ?, amount = ?, currency = ?, account_id = ?, to_account_id = ?, to_amount = ?,
            category_id = ?, description = ?, occurred_at = ?,
            installments_total = ?, first_installment_month = ?, statement_month = ?, budget_month = ?, third_party_name = ?
        WHERE id = ?`
@@ -2179,6 +2683,7 @@ export async function updateTransaction(
       nextCurrency,
       nextAccountId,
       nextToAccountId,
+      nextToAmount,
       nextCategoryId,
       nextDescription,
       nextOccurredAt,
@@ -2278,15 +2783,27 @@ export async function getPeriodSummary(
     today?: string;
   }
 ): Promise<MonthSummary> {
-  const { accounts, categories, tags, transactions, recurringItems } = await loadAllDataSnapshot(db);
-  return computePeriodMetrics(accounts, transactions, categories, tags, {
+  const snapshot = await loadBootstrapSnapshot(db, {
     from: options.from,
     to: options.to,
-    basis: options.basis ?? 'cash',
-    statementMonth: options.statementMonth,
-    recurringItems,
-    today: options.today,
+    includeMonthlyHistory: false,
   });
+  return computePeriodMetrics(
+    snapshot.accounts,
+    snapshot.transactions,
+    snapshot.categories,
+    snapshot.tags,
+    {
+      from: options.from,
+      to: options.to,
+      basis: options.basis ?? 'cash',
+      statementMonth: options.statementMonth,
+      recurringItems: snapshot.recurringItems,
+      today: options.today,
+      precomputedAccounts: snapshot.accountsWithBalances,
+      precomputedThirdParty: snapshot.thirdParty,
+    }
+  );
 }
 
 export async function getMonthSummary(
@@ -2303,8 +2820,39 @@ export async function getMonthlyHistory(
   db: D1Database,
   options: { from: string; to: string; basis?: AccountingBasis }
 ): Promise<MonthlyHistoryPoint[]> {
-  const { accounts, transactions } = await loadAllDataSnapshot(db);
-  return computeMonthlyHistory(accounts, transactions, options);
+  const basis = options.basis ?? 'cash';
+  const months = resolveHistoryMonths(options.from, options.to);
+  const histStartYm = months[0];
+  const histEndYm = months[months.length - 1];
+  const histStartDate = `${histStartYm}-01`;
+  const histEndDate = getMonthDateRange(histEndYm).end;
+
+  const stmts: D1PreparedStatement[] = [
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC'),
+    db
+      .prepare(SQL_MONTHLY_HISTORY_AGGREGATES)
+      .bind(histStartDate, histEndDate, histStartYm, histEndYm),
+  ];
+  if (basis === 'cash') {
+    stmts.push(
+      db.prepare(
+        `SELECT * FROM transactions WHERE ${SQL_CARD_TX_PREDICATE} ORDER BY occurred_at DESC, created_at DESC`
+      )
+    );
+  }
+
+  const results = await db.batch(stmts);
+  const accounts = (results[0].results ?? []) as Account[];
+  const precomputedMonthlyRows = (results[1].results ?? []) as MonthlyHistoryAggregateRow[];
+  const cardTransactions: Transaction[] =
+    basis === 'cash' && results[2]
+      ? ((results[2].results ?? []) as RawTransactionRow[]).map((row) => ({ ...row, tags: [] }))
+      : [];
+
+  return computeMonthlyHistory(accounts, cardTransactions, {
+    ...options,
+    precomputedMonthlyRows,
+  });
 }
 
 export async function listRecurringItems(db: D1Database): Promise<RecurringItem[]> {
