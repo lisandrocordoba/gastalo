@@ -220,7 +220,7 @@ export function AccountModal({
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Ej: Banco Galicia, Billetera, Visa..."
+              placeholder="Ej: Banco Principal, Billetera, Tarjeta..."
               className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
             />
           </div>

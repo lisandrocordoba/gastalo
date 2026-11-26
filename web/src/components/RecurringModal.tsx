@@ -197,7 +197,7 @@ export function RecurringModal({
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Ej: Google AI Pro / Internet / Gimnasio"
+              placeholder="Ej: Internet, Gimnasio, Streaming..."
               className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
             />
           </div>

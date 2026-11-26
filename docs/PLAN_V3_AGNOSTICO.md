@@ -15,7 +15,7 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
    - Arranca con **0 cuentas** y **0 movimientos** (cero menciones a Mercado Pago, BBVA, Efectivo o personas reales).
    - Incluye únicamente una **base genérica, editable y eliminable** de **18 categorías de gasto + 4 de ingreso** y **5 etiquetas universales** (`#casa`, `#hormiga`, `#familia`, `#vacaciones`, `#emergencia`).
 2. **Migración personal 100% fuera de la app:** el script para importar el historial desde *Wallet by BudgetBakers* (`.xls`) vive exclusivamente en local dentro de `imports/` (ignorado en `.gitignore`), completamente separado del código fuente y de las migraciones del proyecto.
-3. **Configuración dual (Web + Telegram):** alta, edición y borrado de **cuentas líquidas, reservas/ahorros, efectivo, tarjetas de crédito (en cualquier moneda), categorías y etiquetas** desde ambos canales.
+3. **Configuración dual (Web + Telegram):** alta, edición y borrado de **cuentas líquidas, reservas/ahorros, efectivo, tarjetas de crédito (en `ARS`, `USD` o `BRL`), categorías y etiquetas** desde ambos canales.
 4. **Resolución por capacidades, nunca por IDs fijos:** toda la lógica de negocio, Gemini y Telegram opera sobre `is_default`, `type` (`wallet`, `savings`, `cash`, `credit_card`) y `currency`, sin depender jamás de IDs como `'mp'`, `'mp_reservas'` o `'bbva_credito'`.
 
 ---
@@ -31,7 +31,7 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
 | [`src/gemini.ts`](../src/gemini.ts) | Prompt e intención con IDs fijos (`mp`, `mp_reservas`, `bbva_credito_usd`, `#abril`, `#hw`, `Jere`, `Tuenti`). | Prompt 100% dinámico desde DB; nuevo `intent: 'manage'` para dar de alta cuentas, tarjetas, categorías y etiquetas por chat. |
 | [`src/telegram.ts`](../src/telegram.ts) | Botón `[🛡️ Pasar a Reservas]` atado a `mp → mp_reservas`; textos y comandos (`/ayuda`, `/saldos`, `/futuro`) nombran `MP`, `BBVA`, `Jere`. | Botón dinámico si existe cuenta `savings`; comando `/cuentas`; mensajes sin nombres fijos; guía si hay 0 cuentas cargadas. |
 | `web/src/components/*` | Sin UI para crear/editar/eliminar cuentas, tarjetas ni categorías; colores por ID; placeholders personales; años fijos `2022..2026`. | Modales de Cuenta/TC y Configuración (`⚙️ Configurar`), onboarding vacío cuando `accounts.length === 0`, textos genéricos y años dinámicos. |
-| [`wrangler.toml`](../wrangler.toml), [`README.md`](../README.md), `docs/` | `database_id` / `DASHBOARD_URL` personales y documentación acoplada al flujo del autor. | `wrangler.example.toml`, [`README.md`](../README.md) y docs actualizados para cualquier usuario que clone el repo. |
+| [`wrangler.toml`](../wrangler.example.toml), [`README.md`](../README.md), `docs/` | `database_id` / `DASHBOARD_URL` personales y documentación acoplada al flujo del autor. | `wrangler.example.toml` como plantilla pública, `wrangler.toml` excluido en `.gitignore` (v3.1), y [`README.md`](../README.md) + docs actualizados para cualquier usuario que clone el repo. |
 
 ---
 
@@ -51,9 +51,10 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
 | Método | Ruta | Comportamiento |
 | :--- | :--- | :--- |
 | `GET` | `/api/accounts` | Lista todas las cuentas con saldo calculado (`AccountWithBalance[]`). |
-| `POST` | `/api/accounts` | Crea cuenta o TC: `{ name, type, currency, initial_balance?, color?, is_default? }`. Genera `id` slug único (`slugifyId`). Si es la primera cuenta líquida (o `is_default: 1`), queda marcada por defecto (`credit_card` nunca es `is_default`). |
-| `PATCH` | `/api/accounts/:id` | Actualiza `{ name?, type?, currency?, initial_balance?, color?, is_default? }`. Bloquea con `409 Conflict` el cambio de `currency` si ya tiene movimientos registrados; mantiene unicidad de `is_default`. |
+| `POST` | `/api/accounts` | Crea cuenta o TC: `{ name, type, currency, initial_balance?, color?, is_default?, due_day? }`. `currency` valida `ARS`/`USD`/`BRL` (default `DEFAULT_CURRENCY`); `due_day` (`1–31`) aplica solo a `credit_card`. Genera `id` slug único (`slugifyId`). Si es la primera cuenta líquida (o `is_default: 1`), queda marcada por defecto (`credit_card` nunca es `is_default`). |
+| `PATCH` | `/api/accounts/:id` | Actualiza `{ name?, type?, currency?, initial_balance?, color?, is_default?, due_day? }`. Bloquea con `409 Conflict` el cambio de `currency` si ya tiene movimientos registrados; mantiene unicidad de `is_default`. |
 | `DELETE` | `/api/accounts/:id` | Bloquea con **`409 Conflict`** si tiene movimientos (`account_id`/`to_account_id`) o gastos fijos vinculados. Si tiene `0` referencias, elimina y promueve otra cuenta líquida si era `is_default`. |
+| `POST` | `/api/accounts/:id/reconcile` | Concilia saldo real (`real_balance`) generando automáticamente un `adjustment` por la diferencia exacta. |
 
 ### B. Categorías (`/api/categories`)
 | Método | Ruta | Comportamiento |
@@ -112,3 +113,12 @@ Transformar **Gasti Personal** en una **aplicación financiera 100% agnóstica y
 | **Etapa 3.4** | UI de gestión de cuentas, TC, categorías y etiquetas + onboarding vacío | `web/src/api.ts`, `web/src/types.ts`, `web/src/App.tsx`, `web/src/components/*` | `feat(web): CRUD visual de cuentas, TC, categorias y etiquetas + onboarding vacio` |
 | **Etapa 3.5** | Plantilla `wrangler.example.toml`, limpieza de `README.md` y `docs/ARQUITECTURA.md` | `wrangler.example.toml`, `README.md`, `docs/ARQUITECTURA.md` | `docs(setup): agregar plantilla wrangler.example.toml y guia de despliegue agnostico` |
 | **Etapa 3.6** | Validación integral en D1 local vacío + importación externa local, reset D1 remoto, merge `dev → main` y deploy | `main`, Cloudflare D1 remoto, Cloudflare Worker | `chore(release): desplegar Gasti v3 agnostico en produccion` |
+
+---
+
+## 8. Endurecimiento v3.1 (sobre v3.0)
+
+Tras validar v3.0 en producción se ejecutó el ciclo de endurecimiento **v3.1** (detalle y justificación de invariantes en [`AGENTS.md`](../AGENTS.md) y [`MODELO_DATOS.md`](MODELO_DATOS.md)):
+- **Atribución en filtros:** `paid_statement_items` + `referencedTransactions` en `/api/bootstrap` y normalización `installments_total >= 2`.
+- **Contabilidad, API y D1:** pagos parciales/múltiples de resumen (`pending` / `partial` / `paid`), monedas acotadas a `ARS`/`USD`/`BRL`, lectura en snapshot único (`loadAllDataSnapshot` vía `db.batch`), `POST /api/transactions/shared` documentado e índices en [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql).
+- **Seguridad *fail-closed* e higiene:** verificación obligatoria de `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_TELEGRAM_USER_ID`, `DASHBOARD_TOKEN`, `auth_date` en `initData`, chat privado (`chat.id === allowedId`), deduplicación de webhook por `telegram_message_id`, `wrangler.toml` excluido en `.gitignore` y limpieza de placeholders en modales UI.
