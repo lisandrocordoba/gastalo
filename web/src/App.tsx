@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CreditCard, Download, KeyRound, Plus, RefreshCw, Settings, Sparkles } from 'lucide-react';
 import {
   createAccount,
@@ -114,27 +114,69 @@ export function App() {
     setRecurringModalOpen(true);
   };
 
+  const requestIdRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const loadData = useCallback(
     async (range: DateRangeValue, activeStatementMonth: string) => {
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const reqId = ++requestIdRef.current;
+
       setLoading(true);
       setError('');
       try {
-        const res = await fetchBootstrap({
-          from: range.from,
-          to: range.to,
-          basis: 'cash',
-          statementMonth: activeStatementMonth,
-        });
+        const res = await fetchBootstrap(
+          {
+            from: range.from,
+            to: range.to,
+            basis: 'cash',
+            statementMonth: activeStatementMonth,
+          },
+          { signal: controller.signal }
+        );
+        if (reqId !== requestIdRef.current) return;
         setData(res);
         setNeedsAuth(false);
       } catch (err) {
+        if (
+          (err instanceof DOMException || err instanceof Error) &&
+          err.name === 'AbortError'
+        ) {
+          return;
+        }
+        if (reqId !== requestIdRef.current) return;
         if (err instanceof UnauthorizedError) {
           setNeedsAuth(true);
         } else {
           setError(err instanceof Error ? err.message : 'Error cargando datos');
         }
       } finally {
-        setLoading(false);
+        if (reqId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  const runAction = useCallback(
+    async (
+      action: () => Promise<void>,
+      fallbackMessage: string,
+      options?: { rethrow?: boolean }
+    ) => {
+      setError('');
+      try {
+        await action();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          setNeedsAuth(true);
+        } else {
+          setError(err instanceof Error ? err.message : fallbackMessage);
+        }
+        if (options?.rethrow) throw err;
       }
     },
     []
@@ -147,6 +189,9 @@ export function App() {
 
   useEffect(() => {
     void loadData(dateRange, statementMonth);
+    return () => {
+      abortControllerRef.current?.abort();
+    };
   }, [dateRange, statementMonth, loadData]);
 
   const handleAuthSubmit = (e: React.FormEvent) => {
@@ -245,9 +290,14 @@ export function App() {
 
             <button
               type="button"
-              onClick={() => void downloadCsv(dateRange.from, dateRange.to)}
+              onClick={() =>
+                void runAction(
+                  () => downloadCsv(dateRange.from, dateRange.to),
+                  'No se pudo exportar el CSV'
+                )
+              }
               title="Exportar CSV"
-              className="hidden items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:inline-flex"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:px-3"
             >
               <Download className="h-3.5 w-3.5" />
               CSV
@@ -392,10 +442,16 @@ export function App() {
               onSelectAccount={handleSelectAccount}
               onCreateAccount={() => openCreateAccountModal('wallet')}
               onEditAccount={openEditAccountModal}
-              onReconcileBalance={async (id, realBalance) => {
-                await reconcileAccount(id, realBalance);
-                await loadData(dateRange, statementMonth);
-              }}
+              onReconcileBalance={(id, realBalance) =>
+                runAction(
+                  async () => {
+                    await reconcileAccount(id, realBalance);
+                    await loadData(dateRange, statementMonth);
+                  },
+                  'No se pudo conciliar el saldo',
+                  { rethrow: true }
+                )
+              }
             />
 
             <CreditCardsSection
@@ -404,29 +460,40 @@ export function App() {
               statements={data.cardStatements}
               accounts={data.accounts}
               categories={data.categories}
-              defaultPayDate={todayStr()}
+              defaultPayDate={data.today ?? todayStr()}
               selectedAccount={selectedAccount}
               onSelectAccount={handleSelectAccount}
               onCreateCard={() => openCreateAccountModal('credit_card')}
               onEditCard={openEditAccountModal}
               onAddSubscription={(cardId) => openCreateRecurringModal(cardId)}
               onPayStatement={async (cardId, payload) => {
-                await payCardStatement(cardId, payload);
+                try {
+                  await payCardStatement(cardId, payload);
+                } catch (err) {
+                  if (err instanceof UnauthorizedError) setNeedsAuth(true);
+                  throw err;
+                }
                 await loadData(dateRange, statementMonth);
               }}
-              onPostRecurringToCard={async (payload) => {
-                await createTransaction({
-                  type: 'expense',
-                  amount: payload.amount,
-                  currency: payload.currency,
-                  account_id: payload.account_id,
-                  category_id: payload.category_id,
-                  description: payload.description,
-                  occurred_at: payload.occurred_at,
-                  statement_month: payload.statement_month,
-                });
-                await loadData(dateRange, statementMonth);
-              }}
+              onPostRecurringToCard={(payload) =>
+                runAction(
+                  async () => {
+                    await createTransaction({
+                      type: 'expense',
+                      amount: payload.amount,
+                      currency: payload.currency,
+                      account_id: payload.account_id,
+                      category_id: payload.category_id,
+                      description: payload.description,
+                      occurred_at: payload.occurred_at,
+                      statement_month: payload.statement_month,
+                    });
+                    await loadData(dateRange, statementMonth);
+                  },
+                  'No se pudo cargar la suscripción en la tarjeta',
+                  { rethrow: true }
+                )
+              }
             />
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -452,20 +519,34 @@ export function App() {
                   accounts={data.accounts}
                   onAddRecurring={() => openCreateRecurringModal()}
                   onEditRecurring={openEditRecurringModal}
-                  onToggleRecurring={async (id, active) => {
-                    await updateRecurringItem(id, { active });
-                    await loadData(dateRange, statementMonth);
-                  }}
-                  onDeleteRecurring={async (id) => {
-                    await deleteRecurringItem(id);
-                    await loadData(dateRange, statementMonth);
-                  }}
+                  onToggleRecurring={(id, active) =>
+                    runAction(
+                      async () => {
+                        await updateRecurringItem(id, { active });
+                        await loadData(dateRange, statementMonth);
+                      },
+                      'No se pudo actualizar el gasto fijo',
+                      { rethrow: true }
+                    )
+                  }
+                  onDeleteRecurring={(id) =>
+                    runAction(
+                      async () => {
+                        await deleteRecurringItem(id);
+                        await loadData(dateRange, statementMonth);
+                      },
+                      'No se pudo eliminar el gasto fijo',
+                      { rethrow: true }
+                    )
+                  }
                 />
               </div>
             </div>
 
             <TransactionList
               transactions={data.transactions}
+              paidStatementItems={data.summary.paid_statement_items ?? []}
+              referencedTransactions={data.referencedTransactions ?? []}
               accounts={data.accounts}
               categories={data.categories}
               tags={data.tags}
@@ -481,10 +562,12 @@ export function App() {
                 setEditingTx(tx);
                 setModalOpen(true);
               }}
-              onDelete={async (id) => {
-                await deleteTransaction(id);
-                await loadData(dateRange, statementMonth);
-              }}
+              onDelete={(id) =>
+                runAction(async () => {
+                  await deleteTransaction(id);
+                  await loadData(dateRange, statementMonth);
+                }, 'No se pudo eliminar el movimiento')
+              }
             />
           </>
         ) : (
@@ -499,7 +582,7 @@ export function App() {
           accounts={data.accounts}
           categories={data.categories}
           tags={data.tags}
-          defaultDate={todayStr()}
+          defaultDate={data.today ?? todayStr()}
           onClose={() => setModalOpen(false)}
           onCreateTag={async (name) => {
             const res = await createTag(name);
@@ -507,15 +590,27 @@ export function App() {
             return res.tag;
           }}
           onSubmit={async (payload) => {
-            if (payload.id) {
-              await updateTransaction(payload.id, payload);
-            } else {
-              await createTransaction(payload);
+            try {
+              if (payload.id) {
+                await updateTransaction(payload.id, payload);
+              } else {
+                await createTransaction(payload);
+              }
+            } catch (err) {
+              if (err instanceof UnauthorizedError) setNeedsAuth(true);
+              throw err;
             }
+            setModalOpen(false);
             await loadData(dateRange, statementMonth);
           }}
           onSubmitShared={async (payload) => {
-            await createSharedPurchase(payload);
+            try {
+              await createSharedPurchase(payload);
+            } catch (err) {
+              if (err instanceof UnauthorizedError) setNeedsAuth(true);
+              throw err;
+            }
+            setModalOpen(false);
             await loadData(dateRange, statementMonth);
           }}
         />
@@ -527,16 +622,34 @@ export function App() {
         defaultType={defaultAccountType}
         onClose={() => setAccountModalOpen(false)}
         onCreate={async (payload) => {
-          await createAccount(payload);
+          try {
+            await createAccount(payload);
+          } catch (err) {
+            if (err instanceof UnauthorizedError) setNeedsAuth(true);
+            throw err;
+          }
+          setAccountModalOpen(false);
           await loadData(dateRange, statementMonth);
         }}
         onUpdate={async (id, patch) => {
-          await updateAccount(id, patch);
+          try {
+            await updateAccount(id, patch);
+          } catch (err) {
+            if (err instanceof UnauthorizedError) setNeedsAuth(true);
+            throw err;
+          }
+          setAccountModalOpen(false);
           await loadData(dateRange, statementMonth);
         }}
         onDelete={async (id) => {
-          await deleteAccount(id);
+          try {
+            await deleteAccount(id);
+          } catch (err) {
+            if (err instanceof UnauthorizedError) setNeedsAuth(true);
+            throw err;
+          }
           if (selectedAccount === id) setSelectedAccount('');
+          setAccountModalOpen(false);
           await loadData(dateRange, statementMonth);
         }}
       />
@@ -591,14 +704,26 @@ export function App() {
             setSettingsOpen(false);
             openEditRecurringModal(item);
           }}
-          onToggleRecurring={async (id, active) => {
-            await updateRecurringItem(id, { active });
-            await loadData(dateRange, statementMonth);
-          }}
-          onDeleteRecurring={async (id) => {
-            await deleteRecurringItem(id);
-            await loadData(dateRange, statementMonth);
-          }}
+          onToggleRecurring={(id, active) =>
+            runAction(
+              async () => {
+                await updateRecurringItem(id, { active });
+                await loadData(dateRange, statementMonth);
+              },
+              'No se pudo actualizar el gasto fijo',
+              { rethrow: true }
+            )
+          }
+          onDeleteRecurring={(id) =>
+            runAction(
+              async () => {
+                await deleteRecurringItem(id);
+                await loadData(dateRange, statementMonth);
+              },
+              'No se pudo eliminar el gasto fijo',
+              { rethrow: true }
+            )
+          }
         />
       )}
 
@@ -612,15 +737,33 @@ export function App() {
           categories={data.categories}
           onClose={() => setRecurringModalOpen(false)}
           onCreate={async (payload) => {
-            await createRecurringItem(payload);
+            try {
+              await createRecurringItem(payload);
+            } catch (err) {
+              if (err instanceof UnauthorizedError) setNeedsAuth(true);
+              throw err;
+            }
+            setRecurringModalOpen(false);
             await loadData(dateRange, statementMonth);
           }}
           onUpdate={async (id, patch) => {
-            await updateRecurringItem(id, patch);
+            try {
+              await updateRecurringItem(id, patch);
+            } catch (err) {
+              if (err instanceof UnauthorizedError) setNeedsAuth(true);
+              throw err;
+            }
+            setRecurringModalOpen(false);
             await loadData(dateRange, statementMonth);
           }}
           onDelete={async (id) => {
-            await deleteRecurringItem(id);
+            try {
+              await deleteRecurringItem(id);
+            } catch (err) {
+              if (err instanceof UnauthorizedError) setNeedsAuth(true);
+              throw err;
+            }
+            setRecurringModalOpen(false);
             await loadData(dateRange, statementMonth);
           }}
         />

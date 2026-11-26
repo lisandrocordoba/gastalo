@@ -279,6 +279,24 @@ export interface PayStatementInput {
   description?: string;
 }
 
+export interface PaidStatementItem {
+  transaction_id: string;
+  payment_transaction_id: string;
+  card_account_id: string;
+  card_account_name: string;
+  statement_month: string;
+  paid_at: string;
+  occurred_at: string;
+  description: string;
+  category_id: string | null;
+  tags: string[];
+  installment_number: number;
+  installments_total: number;
+  installment_amount: number;
+  prorated_amount: number;
+  currency: string;
+}
+
 export interface MonthSummary {
   month: string;
   from: string;
@@ -299,6 +317,7 @@ export interface MonthSummary {
   accounts: AccountWithBalance[];
   card_statements: CardStatement[];
   overdue_card_alerts: OverdueCardAlert[];
+  paid_statement_items: PaidStatementItem[];
 }
 
 export interface MonthlyHistoryPoint {

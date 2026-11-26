@@ -8,6 +8,8 @@ import {
   computePeriodMetrics,
   computeSavingsBalance,
   computeThirdPartyBalances,
+  getTransactionsByIds,
+  listTransactions,
   pickDefaultLiquidAccount,
 } from '../src/db';
 import { sanitizeParsedIntent } from '../src/gemini';
@@ -898,5 +900,235 @@ describe('credit card Opción B (cash flow on statement payment)', () => {
         total_due: 12000,
       },
     ]);
+  });
+
+  it('populates paid_statement_items in cash mode for 1-pay and multi-installment October purchases paid in November, reconciling categories and tags', () => {
+    const extCategories: Category[] = [
+      ...categories,
+      { id: 'compras', name: 'Compras', icon: '🛍️', type: 'expense', color: '#FF7043' },
+    ];
+    const extTags: Tag[] = [
+      ...tags,
+      { id: 'hw', name: 'hw', color: '#3B82F6' },
+    ];
+
+    const txs: Transaction[] = [
+      makeTx({
+        id: 'oct_one_pay',
+        type: 'expense',
+        amount: 30000,
+        account_id: 'card_ars',
+        category_id: 'compras',
+        description: 'Teclado mecánico',
+        occurred_at: '2026-10-12',
+        tags: ['hw'],
+      }),
+      makeTx({
+        id: 'oct_installments',
+        type: 'expense',
+        amount: 90000,
+        account_id: 'card_ars',
+        category_id: 'compras',
+        description: 'Monitor',
+        occurred_at: '2026-10-15',
+        installments_total: 3,
+        first_installment_month: '2026-11',
+        tags: ['hw'],
+      }),
+      makeTx({
+        id: 'oct_uncategorized',
+        type: 'expense',
+        amount: 15000,
+        account_id: 'card_ars',
+        category_id: null,
+        description: 'Cargo sin categoría',
+        occurred_at: '2026-10-20',
+      }),
+      makeTx({
+        id: 'pay_nov_stmt',
+        type: 'transfer',
+        amount: 75000, // 30000 + 30000 (cuota 1/3) + 15000
+        account_id: 'wallet_main',
+        to_account_id: 'card_ars',
+        description: 'Pago resumen Tarjeta Crédito 2026-11',
+        occurred_at: '2026-11-08',
+        statement_month: '2026-11',
+      }),
+    ];
+
+    const novSummary = computePeriodMetrics(accounts, txs, extCategories, extTags, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      basis: 'cash',
+      statementMonth: '2026-11',
+    });
+
+    expect(novSummary.expense).toBe(75000);
+    expect(novSummary.paid_statement_items).toEqual([
+      {
+        transaction_id: 'oct_one_pay',
+        payment_transaction_id: 'pay_nov_stmt',
+        card_account_id: 'card_ars',
+        card_account_name: 'Tarjeta Crédito',
+        statement_month: '2026-11',
+        paid_at: '2026-11-08',
+        occurred_at: '2026-10-12',
+        description: 'Teclado mecánico',
+        category_id: 'compras',
+        tags: ['hw'],
+        installment_number: 1,
+        installments_total: 1,
+        installment_amount: 30000,
+        prorated_amount: 30000,
+        currency: 'ARS',
+      },
+      {
+        transaction_id: 'oct_installments',
+        payment_transaction_id: 'pay_nov_stmt',
+        card_account_id: 'card_ars',
+        card_account_name: 'Tarjeta Crédito',
+        statement_month: '2026-11',
+        paid_at: '2026-11-08',
+        occurred_at: '2026-10-15',
+        description: 'Monitor',
+        category_id: 'compras',
+        tags: ['hw'],
+        installment_number: 1,
+        installments_total: 3,
+        installment_amount: 30000,
+        prorated_amount: 30000,
+        currency: 'ARS',
+      },
+      {
+        transaction_id: 'oct_uncategorized',
+        payment_transaction_id: 'pay_nov_stmt',
+        card_account_id: 'card_ars',
+        card_account_name: 'Tarjeta Crédito',
+        statement_month: '2026-11',
+        paid_at: '2026-11-08',
+        occurred_at: '2026-10-20',
+        description: 'Cargo sin categoría',
+        category_id: null,
+        tags: [],
+        installment_number: 1,
+        installments_total: 1,
+        installment_amount: 15000,
+        prorated_amount: 15000,
+        currency: 'ARS',
+      },
+    ]);
+
+    const comprasPaidSum = novSummary.paid_statement_items
+      .filter((i) => i.category_id === 'compras')
+      .reduce((s, i) => s + i.prorated_amount, 0);
+    const hwPaidSum = novSummary.paid_statement_items
+      .filter((i) => i.tags.includes('hw'))
+      .reduce((s, i) => s + i.prorated_amount, 0);
+    const uncategorizedPaidSum = novSummary.paid_statement_items
+      .filter((i) => i.category_id === null)
+      .reduce((s, i) => s + i.prorated_amount, 0);
+
+    expect(comprasPaidSum).toBe(60000);
+    expect(novSummary.by_category.find((c) => c.category_id === 'compras')?.total).toBe(comprasPaidSum);
+    expect(hwPaidSum).toBe(60000);
+    expect(novSummary.by_tag.find((t) => t.tag_id === 'hw')?.total).toBe(hwPaidSum);
+    expect(uncategorizedPaidSum).toBe(15000);
+    expect(novSummary.by_category.find((c) => c.category_id === 'otros')?.total).toBe(uncategorizedPaidSum);
+  });
+});
+
+describe('D1 query helpers (listTransactions and getTransactionsByIds)', () => {
+  it('uses safe budget_month GLOB predicate and matches raw/slugified tagId in listTransactions', async () => {
+    const captured: Array<{ sql: string; args: unknown[] }> = [];
+    const mockDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: unknown[]) {
+            return {
+              async all() {
+                captured.push({ sql, args });
+                return { results: [] };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    await listTransactions(mockDb, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      tagId: '#Mi_Tag',
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].sql).toContain(
+      "CASE WHEN t.budget_month GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' THEN t.budget_month || '-01' ELSE t.occurred_at END >= ?"
+    );
+    expect(captured[0].sql).toContain('(tt.tag_id = ? OR tt.tag_id = ?)');
+    expect(captured[0].args).toEqual(['2026-11-01', '2026-11-30', 'Mi_Tag', 'mi_tag', 300]);
+  });
+
+  it('deduplicates ids, skips empty input, and chunks queries at 80 placeholders in getTransactionsByIds', async () => {
+    const queries: Array<{ sql: string; args: unknown[] }> = [];
+    const mockDb = {
+      prepare(sql: string) {
+        const exec = async (args: unknown[]) => {
+          queries.push({ sql, args });
+          if (sql.includes('FROM transactions')) {
+            return {
+              results: args.map((id) => ({
+                id,
+                type: 'expense',
+                amount: 100,
+                currency: 'ARS',
+                account_id: 'wallet_main',
+                to_account_id: null,
+                category_id: 'otros',
+                description: `tx ${id}`,
+                occurred_at: '2026-10-01',
+                source: 'test',
+                raw_input: null,
+                telegram_message_id: null,
+                installments_total: null,
+                first_installment_month: null,
+                statement_month: null,
+                budget_month: null,
+                third_party_name: null,
+                linked_group_id: null,
+                created_at: '2026-10-01T00:00:00Z',
+              })),
+            };
+          }
+          return {
+            results: [{ transaction_id: 'id_1', tag_id: 'hw' }],
+          };
+        };
+        return {
+          bind(...args: unknown[]) {
+            return {
+              all: () => exec(args),
+            };
+          },
+          all: () => exec([]),
+        };
+      },
+    } as unknown as D1Database;
+
+    expect(await getTransactionsByIds(mockDb, [])).toEqual([]);
+    expect(await getTransactionsByIds(mockDb, ['', '   '])).toEqual([]);
+    expect(queries).toHaveLength(0);
+
+    const ids = Array.from({ length: 85 }, (_, i) => `id_${i + 1}`);
+    ids.push('id_1', '  id_2  ');
+    const txs = await getTransactionsByIds(mockDb, ids);
+
+    expect(txs).toHaveLength(85);
+    expect(txs.find((t) => t.id === 'id_1')?.tags).toEqual(['hw']);
+
+    const txQueries = queries.filter((q) => q.sql.includes('FROM transactions'));
+    expect(txQueries).toHaveLength(2);
+    expect(txQueries[0].args).toHaveLength(80);
+    expect(txQueries[1].args).toHaveLength(5);
   });
 });

@@ -97,6 +97,7 @@ export function CreditCardsSection({
   const [error, setError] = useState('');
   const [recurringDrafts, setRecurringDrafts] = useState<Record<string, string>>({});
   const [postingRecId, setPostingRecId] = useState<string | null>(null);
+  const [recurringError, setRecurringError] = useState('');
 
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const catMap = new Map(categories.map((c) => [c.id, c]));
@@ -474,8 +475,12 @@ export function CreditCardsSection({
                                       disabled={isPosting}
                                       onClick={async () => {
                                         const amt = Number(draftVal);
-                                        if (!Number.isFinite(amt) || amt <= 0) return;
+                                        if (!Number.isFinite(amt) || amt <= 0) {
+                                          setRecurringError('Ingresá un monto válido mayor a 0.');
+                                          return;
+                                        }
                                         setPostingRecId(draftKey);
+                                        setRecurringError('');
                                         try {
                                           await onPostRecurringToCard({
                                             account_id: st.account_id,
@@ -490,6 +495,12 @@ export function CreditCardsSection({
                                             ),
                                             statement_month: st.statement_month,
                                           });
+                                        } catch (err) {
+                                          setRecurringError(
+                                            err instanceof Error
+                                              ? err.message
+                                              : 'No se pudo cargar la suscripción'
+                                          );
                                         } finally {
                                           setPostingRecId(null);
                                         }
@@ -504,6 +515,9 @@ export function CreditCardsSection({
                             );
                           })}
                         </div>
+                        {recurringError && (
+                          <p className="mt-1.5 text-[11px] text-rose-400">{recurringError}</p>
+                        )}
                       </div>
                     )}
                   </div>
@@ -516,8 +530,8 @@ export function CreditCardsSection({
       )}
 
       {payingStatement && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/75 p-4 backdrop-blur-xs">
+          <div className="my-auto w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold text-white">
                 Pagar resumen {payingStatement.account_name} ({payingStatement.statement_month})

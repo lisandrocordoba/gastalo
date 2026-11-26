@@ -29,6 +29,7 @@ export function AccountsGrid({
   const [reconcileId, setReconcileId] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState('');
   const [saving, setSaving] = useState(false);
+  const [reconcileError, setReconcileError] = useState('');
 
   const liquidAccounts = accounts.filter((a) => a.type !== 'credit_card');
   const hasSelectedLiquid = liquidAccounts.some((a) => a.id === selectedAccount);
@@ -36,19 +37,27 @@ export function AccountsGrid({
   const startReconcile = (acc: AccountWithBalance) => {
     setReconcileId(acc.id);
     setDraftValue(String(acc.balance));
+    setReconcileError('');
   };
 
   const cancelReconcile = () => {
     setReconcileId(null);
+    setReconcileError('');
   };
 
   const submitReconcile = async (accId: string) => {
     const num = Number(draftValue);
-    if (!Number.isFinite(num)) return;
+    if (!Number.isFinite(num)) {
+      setReconcileError('Ingresá un saldo numérico válido.');
+      return;
+    }
     setSaving(true);
+    setReconcileError('');
     try {
       await onReconcileBalance(accId, num);
       cancelReconcile();
+    } catch (err) {
+      setReconcileError(err instanceof Error ? err.message : 'No se pudo conciliar el saldo');
     } finally {
       setSaving(false);
     }
@@ -210,12 +219,16 @@ export function AccountsGrid({
                       </button>
                       <button
                         type="button"
+                        disabled={saving}
                         onClick={cancelReconcile}
-                        className="rounded-lg bg-zinc-800 p-1.5 text-zinc-300 hover:bg-zinc-700"
+                        className="rounded-lg bg-zinc-800 p-1.5 text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </div>
+                    {reconcileError && (
+                      <p className="text-[11px] text-rose-400">{reconcileError}</p>
+                    )}
                   </div>
                 ) : (
                   <p className="mt-1 text-[11px] text-zinc-400 tabular-nums">

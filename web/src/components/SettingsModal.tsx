@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pause, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { AccountType, AccountWithBalance, Category, RecurringItem, Tag } from '../types';
@@ -87,8 +87,6 @@ export function SettingsModal({
   const [tagName, setTagName] = useState('');
   const [tagColor, setTagColor] = useState('#29B6F6');
 
-  if (!open) return null;
-
   const resetCatForm = () => {
     setEditingCatId(null);
     setCatIcon('📦');
@@ -102,6 +100,17 @@ export function SettingsModal({
     setTagName('');
     setTagColor('#29B6F6');
   };
+
+  useEffect(() => {
+    if (!open) return;
+    setTab('accounts');
+    setError('');
+    setSaving(false);
+    resetCatForm();
+    resetTagForm();
+  }, [open]);
+
+  if (!open) return null;
 
   const handleCatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -458,8 +467,13 @@ export function SettingsModal({
                         type="button"
                         onClick={async () => {
                           if (!window.confirm(`¿Eliminar etiqueta #${tag.name}?`)) return;
-                          await onDeleteTag(tag.id);
-                          if (editingTagId === tag.id) resetTagForm();
+                          setError('');
+                          try {
+                            await onDeleteTag(tag.id);
+                            if (editingTagId === tag.id) resetTagForm();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'No se pudo eliminar');
+                          }
                         }}
                         className="rounded-lg p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
                         title="Eliminar"
@@ -525,7 +539,16 @@ export function SettingsModal({
                         </button>
                         <button
                           type="button"
-                          onClick={() => void onToggleRecurring(item.id, item.active === 1 ? 0 : 1)}
+                          onClick={async () => {
+                            setError('');
+                            try {
+                              await onToggleRecurring(item.id, item.active === 1 ? 0 : 1);
+                            } catch (err) {
+                              setError(
+                                err instanceof Error ? err.message : 'No se pudo actualizar el gasto fijo'
+                              );
+                            }
+                          }}
                           title={item.active === 1 ? 'Pausar' : 'Activar'}
                           className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white"
                         >
@@ -545,7 +568,14 @@ export function SettingsModal({
                             ) {
                               return;
                             }
-                            await onDeleteRecurring(item.id);
+                            setError('');
+                            try {
+                              await onDeleteRecurring(item.id);
+                            } catch (err) {
+                              setError(
+                                err instanceof Error ? err.message : 'No se pudo eliminar el gasto fijo'
+                              );
+                            }
                           }}
                           title="Eliminar"
                           className="rounded-lg p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"

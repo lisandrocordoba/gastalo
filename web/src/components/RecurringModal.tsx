@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Trash2, X } from 'lucide-react';
 import type { AccountWithBalance, Category, RecurringItem } from '../types';
 
@@ -58,16 +58,26 @@ export function RecurringModal({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
+  const prevOpenRef = useRef(false);
+  const prevEditingIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    const currentEditingId = editing?.id ?? null;
+    const justOpened = open && !prevOpenRef.current;
+    const editingChangedWhileOpen =
+      open && prevOpenRef.current && currentEditingId !== prevEditingIdRef.current;
+    prevOpenRef.current = open;
+    prevEditingIdRef.current = currentEditingId;
+
+    if (!open || (!justOpened && !editingChangedWhileOpen)) return;
+
     setError('');
     if (editing) {
       setName(editing.name);
       setAmount(String(editing.amount));
       setAccountId(editing.account_id || fallbackAccountId);
       setCategoryId(editing.category_id ?? fallbackCategoryId);
-      setStartMonth(editing.start_month ?? defaultStartMonth);
+      setStartMonth(editing.start_month ?? '');
       setDayOfMonth(editing.day_of_month ? String(editing.day_of_month) : '');
       setActive(editing.active === 1);
     } else {
@@ -292,7 +302,7 @@ export function RecurringModal({
               <div className="flex flex-col gap-0.5">
                 <button
                   type="button"
-                  disabled={deleting}
+                  disabled={saving || deleting}
                   onClick={handleDelete}
                   className="inline-flex w-fit items-center gap-1 rounded-xl border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
                 >
@@ -317,7 +327,7 @@ export function RecurringModal({
               </button>
               <button
                 type="submit"
-                disabled={saving || accounts.length === 0}
+                disabled={saving || deleting || accounts.length === 0}
                 className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
               >
                 {saving ? 'Guardando...' : editing ? 'Guardar cambios' : 'Crear'}
