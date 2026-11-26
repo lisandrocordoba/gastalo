@@ -788,5 +788,191 @@ describe('Backend HTTP/D1 API integration', () => {
       expect(csvText).toContain("'-1+1");
       expect(csvText).toContain("'@evil");
     });
+
+    it('creates and updates credit card closing_day and rejects invalid closing_day with 400', async () => {
+      const invalidCreate = await apiJson(env, '/api/accounts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Card Invalid Closing',
+          type: 'credit_card',
+          currency: 'ARS',
+          closing_day: 32,
+        }),
+      });
+      expect(invalidCreate.status).toBe(400);
+
+      const created = await apiJson<{ account: AccountWithBalance }>(env, '/api/accounts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Visa Closing Test',
+          type: 'credit_card',
+          currency: 'ARS',
+          due_day: 10,
+          closing_day: 25,
+        }),
+      });
+      expect(created.status).toBe(201);
+      expect(created.data.account.closing_day).toBe(25);
+
+      const invalidPatch = await apiJson(env, `/api/accounts/${created.data.account.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ closing_day: 0 }),
+      });
+      expect(invalidPatch.status).toBe(400);
+
+      const updated = await apiJson<{ account: AccountWithBalance }>(
+        env,
+        `/api/accounts/${created.data.account.id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ closing_day: 27 }),
+        }
+      );
+      expect(updated.status).toBe(200);
+      expect(updated.data.account.closing_day).toBe(27);
+    });
+
+    it('settles a USD credit card purchase from an ARS wallet via source_amount and supports cross-currency transfers with to_amount', async () => {
+      const arsWallet = (
+        await apiJson<{ account: AccountWithBalance }>(env, '/api/accounts', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Billetera ARS',
+            type: 'wallet',
+            currency: 'ARS',
+            initial_balance: 100000,
+            is_default: 1,
+          }),
+        })
+      ).data.account;
+
+      const usdSavings = (
+        await apiJson<{ account: AccountWithBalance }>(env, '/api/accounts', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Caja USD',
+            type: 'savings',
+            currency: 'USD',
+            initial_balance: 0,
+          }),
+        })
+      ).data.account;
+
+      const usdCard = (
+        await apiJson<{ account: AccountWithBalance }>(env, '/api/accounts', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Tarjeta USD',
+            type: 'credit_card',
+            currency: 'USD',
+            closing_day: 25,
+            due_day: 10,
+          }),
+        })
+      ).data.account;
+
+      // Cross-currency transfer without to_amount -> 400
+      const missingToAmount = await apiJson(env, '/api/transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'transfer',
+          amount: 15000,
+          account_id: arsWallet.id,
+          to_account_id: usdSavings.id,
+          description: 'Compra USD sin monto destino',
+          occurred_at: '2026-11-05',
+        }),
+      });
+      expect(missingToAmount.status).toBe(400);
+
+      // Cross-currency transfer with to_amount -> 201
+      const fxTransfer = await apiJson<{ transaction: Transaction }>(env, '/api/transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'transfer',
+          amount: 15000,
+          to_amount: 10,
+          account_id: arsWallet.id,
+          to_account_id: usdSavings.id,
+          description: 'Compra 10 USD',
+          occurred_at: '2026-11-05',
+        }),
+      });
+      expect(fxTransfer.status).toBe(201);
+      expect(fxTransfer.data.transaction.to_amount).toBe(10);
+
+      // USD card purchase before closing_day (2026-10-15 <= 25 -> 2026-11 statement)
+      const usdPurchase = await apiJson<{ transaction: Transaction }>(env, '/api/transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'expense',
+          amount: 6.69,
+          account_id: usdCard.id,
+          category_id: 'servicios',
+          description: 'Hosting USD',
+          occurred_at: '2026-10-15',
+        }),
+      });
+      expect(usdPurchase.status).toBe(201);
+
+      // Paying USD card from ARS wallet without source_amount -> 400
+      const missingSourceAmount = await apiJson(env, `/api/cards/${usdCard.id}/pay-statement`, {
+        method: 'POST',
+        body: JSON.stringify({
+          statement_month: '2026-11',
+          from_account_id: arsWallet.id,
+          amount: 6.69,
+          occurred_at: '2026-11-10',
+        }),
+      });
+      expect(missingSourceAmount.status).toBe(400);
+
+      // Paying USD card from ARS wallet with source_amount -> 201
+      const fxPay = await apiJson<{
+        transfer: Transaction;
+        accounts: AccountWithBalance[];
+        cardStatements: CardStatement[];
+      }>(env, `/api/cards/${usdCard.id}/pay-statement`, {
+        method: 'POST',
+        body: JSON.stringify({
+          statement_month: '2026-11',
+          from_account_id: arsWallet.id,
+          amount: 6.69,
+          source_amount: 10350,
+          occurred_at: '2026-11-10',
+        }),
+      });
+      expect(fxPay.status).toBe(201);
+      expect(fxPay.data.transfer.currency).toBe('ARS');
+      expect(fxPay.data.transfer.amount).toBe(10350);
+      expect(fxPay.data.transfer.to_amount).toBe(6.69);
+
+      const bootRes = await apiJson<{
+        accounts: AccountWithBalance[];
+        cardStatements: CardStatement[];
+        summary: MonthSummary;
+      }>(env, '/api/bootstrap?from=2026-11-01&to=2026-11-30&basis=cash&statementMonth=2026-11');
+      expect(bootRes.status).toBe(200);
+
+      const balances = Object.fromEntries(bootRes.data.accounts.map((a) => [a.id, a.balance]));
+      expect(balances[arsWallet.id]).toBe(74650); // 100000 - 15000 - 10350
+      expect(balances[usdSavings.id]).toBe(10);
+      expect(balances[usdCard.id]).toBe(0);
+
+      const stmt = bootRes.data.cardStatements.find((s) => s.account_id === usdCard.id)!;
+      expect(stmt.status).toBe('paid');
+      expect(stmt.paid_amount).toBe(6.69);
+      expect(stmt.remaining_due).toBe(0);
+
+      expect(bootRes.data.summary.expense).toBe(10350);
+      expect(bootRes.data.summary.usd_expense).toBe(0);
+      expect(bootRes.data.summary.paid_statement_items).toEqual([
+        expect.objectContaining({
+          transaction_id: usdPurchase.data.transaction.id,
+          prorated_amount: 10350,
+          currency: 'ARS',
+        }),
+      ]);
+    });
   });
 });

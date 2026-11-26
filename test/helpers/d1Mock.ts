@@ -26,7 +26,7 @@ export function createTestD1(): { db: D1Database; close: () => void } {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec('PRAGMA foreign_keys = ON;');
 
-  const migrationFiles = ['0001_initial.sql', '0002_indexes.sql'];
+  const migrationFiles = ['0001_initial.sql', '0002_indexes.sql', '0003_cards_closing_and_fx.sql'];
   for (const file of migrationFiles) {
     const sql = readFileSync(resolve('migrations', file), 'utf8');
     sqlite.exec(sql);

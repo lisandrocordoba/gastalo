@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
-import type { CreateSharedPurchasePayload, CreateTransactionPayload } from '../api';
+import {
+  formatMoney,
+  type CreateSharedPurchasePayload,
+  type CreateTransactionPayload,
+} from '../api';
 import {
   SUPPORTED_CURRENCIES,
   type AccountWithBalance,
@@ -10,6 +14,7 @@ import {
   type Transaction,
   type TransactionType,
 } from '../types';
+import { defaultCardStatementMonth } from '../utils/cardDates';
 
 interface Props {
   open: boolean;
@@ -48,6 +53,44 @@ function nextMonthFromDate(dateStr: string): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+function formatImpliedFxHint(
+  fromCurrency: string,
+  fromAmount: number,
+  toCurrency: string,
+  toAmountValue: number
+): string | null {
+  if (
+    !Number.isFinite(fromAmount) ||
+    fromAmount <= 0 ||
+    !Number.isFinite(toAmountValue) ||
+    toAmountValue <= 0 ||
+    fromCurrency === toCurrency
+  ) {
+    return null;
+  }
+  if (fromCurrency === 'ARS') {
+    return `TC implícito: 1 ${toCurrency} = ${formatMoney(fromAmount / toAmountValue, 'ARS')}`;
+  }
+  if (toCurrency === 'ARS') {
+    return `TC implícito: 1 ${fromCurrency} = ${formatMoney(toAmountValue / fromAmount, 'ARS')}`;
+  }
+  return `TC implícito: 1 ${fromCurrency} = ${formatMoney(toAmountValue / fromAmount, toCurrency)}`;
+}
+
+function pickPreferredTransferTarget(
+  accounts: AccountWithBalance[],
+  sourceAccountId: string,
+  sourceCurrency: string
+): AccountWithBalance | undefined {
+  const candidates = accounts.filter((a) => a.id !== sourceAccountId);
+  return (
+    candidates.find((a) => a.type === 'savings' && a.currency === sourceCurrency) ??
+    candidates.find((a) => a.currency === sourceCurrency) ??
+    candidates.find((a) => a.type === 'savings') ??
+    candidates[0]
+  );
+}
+
 export function TransactionModal({
   open,
   editing,
@@ -65,6 +108,7 @@ export function TransactionModal({
   const [currency, setCurrency] = useState('ARS');
   const [accountId, setAccountId] = useState('');
   const [toAccountId, setToAccountId] = useState('');
+  const [toAmount, setToAmount] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [description, setDescription] = useState('');
   const [occurredAt, setOccurredAt] = useState(defaultDate);
@@ -72,6 +116,7 @@ export function TransactionModal({
   const [newTagInput, setNewTagInput] = useState('');
   const [installments, setInstallments] = useState('');
   const [firstInstallmentMonth, setFirstInstallmentMonth] = useState('');
+  const [firstInstallmentTouched, setFirstInstallmentTouched] = useState(false);
   const [budgetMonth, setBudgetMonth] = useState('');
   const [thirdPartyName, setThirdPartyName] = useState('');
   const [isShared, setIsShared] = useState(false);
@@ -101,30 +146,25 @@ export function TransactionModal({
       accounts[0];
     const defAccId = defAcc?.id ?? '';
     const defCurrency = defAcc?.currency ?? 'ARS';
-    const defToAcc =
-      accounts.find(
-        (a) => a.type === 'savings' && a.id !== defAccId && a.currency === defCurrency
-      ) ?? accounts.find((a) => a.id !== defAccId && a.currency === defCurrency);
+    const defToAcc = pickPreferredTransferTarget(accounts, defAccId, defCurrency);
     const defExpenseCat = categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? '';
 
     if (editing) {
       const editAcc = accounts.find((a) => a.id === editing.account_id);
       const editCurrency = editAcc?.currency ?? editing.currency;
-      const validEditTargets = accounts.filter(
-        (a) => a.id !== editing.account_id && a.currency === editCurrency
-      );
+      const validEditTargets = accounts.filter((a) => a.id !== editing.account_id);
       const preferredEditTo =
         (editing.to_account_id && validEditTargets.some((a) => a.id === editing.to_account_id)
           ? editing.to_account_id
           : null) ??
-        validEditTargets.find((a) => a.type === 'savings')?.id ??
-        validEditTargets[0]?.id ??
+        pickPreferredTransferTarget(accounts, editing.account_id, editCurrency)?.id ??
         '';
       setType(editing.type);
       setAmount(String(editing.amount));
       setCurrency(editCurrency);
       setAccountId(editing.account_id);
       setToAccountId(preferredEditTo);
+      setToAmount(editing.to_amount != null ? String(editing.to_amount) : '');
       setCategoryId(editing.category_id ?? '');
       setDescription(editing.description);
       setOccurredAt(editing.occurred_at);
@@ -135,6 +175,7 @@ export function TransactionModal({
           : ''
       );
       setFirstInstallmentMonth(editing.first_installment_month ?? '');
+      setFirstInstallmentTouched(true);
       setBudgetMonth(editing.budget_month ?? '');
       setThirdPartyName(editing.third_party_name ?? '');
       setIsShared(false);
@@ -145,12 +186,14 @@ export function TransactionModal({
       setCurrency(defCurrency);
       setAccountId(defAccId);
       setToAccountId(defToAcc?.id ?? '');
+      setToAmount('');
       setCategoryId(defExpenseCat);
       setDescription('');
       setOccurredAt(defaultDate);
       setSelectedTags([]);
       setInstallments('');
-      setFirstInstallmentMonth(nextMonthFromDate(defaultDate));
+      setFirstInstallmentMonth(defaultCardStatementMonth(defaultDate, defAcc?.closing_day));
+      setFirstInstallmentTouched(false);
       setBudgetMonth('');
       setThirdPartyName('');
       setIsShared(false);
@@ -162,9 +205,14 @@ export function TransactionModal({
 
   const selectedAccount = accounts.find((a) => a.id === accountId);
   const effectiveCurrency = selectedAccount?.currency ?? currency;
-  const transferTargets = accounts.filter(
-    (a) => a.id !== accountId && a.currency === effectiveCurrency
-  );
+  const transferTargets = accounts.filter((a) => a.id !== accountId);
+  const toAccount = type === 'transfer' ? accounts.find((a) => a.id === toAccountId) : undefined;
+  const isCrossCurrencyTransfer =
+    type === 'transfer' && Boolean(toAccount && toAccount.currency !== effectiveCurrency);
+  const transferFxHint =
+    isCrossCurrencyTransfer && toAccount
+      ? formatImpliedFxHint(effectiveCurrency, Number(amount), toAccount.currency, Number(toAmount))
+      : null;
   const isCreditCard = selectedAccount?.type === 'credit_card';
   const showCategory = type === 'expense' || type === 'income';
   const showThirdPartyField =
@@ -172,6 +220,13 @@ export function TransactionModal({
   const filteredCategories = categories.filter((c) =>
     type === 'income' ? c.type === 'income' || c.type === 'both' : c.type === 'expense' || c.type === 'both'
   );
+
+  const handleOccurredAtChange = (nextDate: string) => {
+    setOccurredAt(nextDate);
+    if (!editing && selectedAccount?.type === 'credit_card' && !firstInstallmentTouched) {
+      setFirstInstallmentMonth(defaultCardStatementMonth(nextDate, selectedAccount.closing_day));
+    }
+  };
 
   const toggleTag = (tagId: string) => {
     setSelectedTags((prev) =>
@@ -212,7 +267,7 @@ export function TransactionModal({
     }
     if (type === 'transfer') {
       if (transferTargets.length === 0 || !toAccountId) {
-        setError(`No hay otra cuenta en ${effectiveCurrency} disponible como destino.`);
+        setError('No hay otra cuenta disponible como destino.');
         return;
       }
       const targetAcc = accounts.find((a) => a.id === toAccountId);
@@ -221,8 +276,11 @@ export function TransactionModal({
         return;
       }
       if (targetAcc.currency !== effectiveCurrency) {
-        setError('Las transferencias deben ser entre cuentas de la misma moneda.');
-        return;
+        const numToAmount = Number(toAmount);
+        if (!Number.isFinite(numToAmount) || numToAmount <= 0) {
+          setError(`Ingresá un monto recibido válido en ${targetAcc.currency}.`);
+          return;
+        }
       }
     }
 
@@ -258,7 +316,8 @@ export function TransactionModal({
           installments_total: isCreditCard ? parsedInst : null,
           first_installment_month:
             isCreditCard && parsedInst
-              ? firstInstallmentMonth || nextMonthFromDate(occurredAt)
+              ? firstInstallmentMonth ||
+                defaultCardStatementMonth(occurredAt, selectedAccount?.closing_day)
               : null,
           tags: selectedTags,
         });
@@ -281,6 +340,7 @@ export function TransactionModal({
         currency: effectiveCurrency,
         account_id: accountId,
         to_account_id: type === 'transfer' ? toAccountId : null,
+        to_amount: isCrossCurrencyTransfer ? Number(toAmount) : null,
         category_id: showCategory ? categoryId || null : null,
         description: description.trim(),
         occurred_at: occurredAt,
@@ -288,7 +348,8 @@ export function TransactionModal({
         installments_total: isCreditCard ? parsedInst : null,
         first_installment_month:
           isCreditCard && parsedInst
-            ? firstInstallmentMonth || nextMonthFromDate(occurredAt)
+            ? firstInstallmentMonth ||
+              defaultCardStatementMonth(occurredAt, selectedAccount?.closing_day)
             : null,
         budget_month:
           (type === 'income' || type === 'expense') && budgetMonth ? budgetMonth : null,
@@ -346,13 +407,15 @@ export function TransactionModal({
                         );
                       }
                       if (t.id === 'transfer') {
-                        const validTargets = accounts.filter(
-                          (a) => a.id !== accountId && a.currency === effectiveCurrency
-                        );
+                        const validTargets = accounts.filter((a) => a.id !== accountId);
                         if (!validTargets.some((a) => a.id === toAccountId)) {
-                          const preferredTarget =
-                            validTargets.find((a) => a.type === 'savings') ?? validTargets[0];
+                          const preferredTarget = pickPreferredTransferTarget(
+                            accounts,
+                            accountId,
+                            effectiveCurrency
+                          );
                           setToAccountId(preferredTarget?.id ?? '');
+                          setToAmount('');
                         }
                       }
                       if (t.id !== 'expense') setIsShared(false);
@@ -430,13 +493,20 @@ export function TransactionModal({
                   const nextAcc = accounts.find((a) => a.id === nextAccId);
                   const nextCurrency = nextAcc?.currency ?? 'ARS';
                   setCurrency(nextCurrency);
-                  const validTargets = accounts.filter(
-                    (a) => a.id !== nextAccId && a.currency === nextCurrency
-                  );
+                  const validTargets = accounts.filter((a) => a.id !== nextAccId);
                   if (!validTargets.some((a) => a.id === toAccountId)) {
-                    const preferredTarget =
-                      validTargets.find((a) => a.type === 'savings') ?? validTargets[0];
+                    const preferredTarget = pickPreferredTransferTarget(
+                      accounts,
+                      nextAccId,
+                      nextCurrency
+                    );
                     setToAccountId(preferredTarget?.id ?? '');
+                    setToAmount('');
+                  }
+                  if (!editing && nextAcc?.type === 'credit_card' && !firstInstallmentTouched) {
+                    setFirstInstallmentMonth(
+                      defaultCardStatementMonth(occurredAt, nextAcc.closing_day)
+                    );
                   }
                 }}
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
@@ -458,17 +528,26 @@ export function TransactionModal({
                 <label className="mb-1 block text-xs text-zinc-400">Cuenta destino</label>
                 {transferTargets.length === 0 ? (
                   <p className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                    No hay otra cuenta en {effectiveCurrency} para transferir.
+                    No hay otra cuenta disponible para transferir.
                   </p>
                 ) : (
                   <select
                     value={toAccountId}
-                    onChange={(e) => setToAccountId(e.target.value)}
+                    onChange={(e) => {
+                      const nextToId = e.target.value;
+                      setToAccountId(nextToId);
+                      const nextTo = accounts.find((a) => a.id === nextToId);
+                      if (!nextTo || nextTo.currency === effectiveCurrency) {
+                        setToAmount('');
+                      } else if (!editing && toAccount?.currency !== nextTo.currency) {
+                        setToAmount('');
+                      }
+                    }}
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                   >
                     {transferTargets.map((a) => (
                       <option key={a.id} value={a.id}>
-                        {a.name}
+                        {a.name} ({a.currency})
                       </option>
                     ))}
                   </select>
@@ -497,12 +576,33 @@ export function TransactionModal({
                   type="date"
                   required
                   value={occurredAt}
-                  onChange={(e) => setOccurredAt(e.target.value)}
+                  onChange={(e) => handleOccurredAtChange(e.target.value)}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
             )}
           </div>
+
+          {isCrossCurrencyTransfer && toAccount && (
+            <div>
+              <label className="mb-1 block text-xs text-zinc-400">
+                Monto recibido en {toAccount.currency}
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                required
+                value={toAmount}
+                onChange={(e) => setToAmount(e.target.value)}
+                placeholder={`Ej: 100 (${toAccount.currency})`}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+              />
+              {transferFxHint && (
+                <p className="mt-1 text-[11px] text-sky-300 tabular-nums">{transferFxHint}</p>
+              )}
+            </div>
+          )}
 
           {(type === 'transfer' || showCategory) && (
             <div className={showCategory ? 'grid grid-cols-2 gap-2' : undefined}>
@@ -512,7 +612,7 @@ export function TransactionModal({
                   type="date"
                   required
                   value={occurredAt}
-                  onChange={(e) => setOccurredAt(e.target.value)}
+                  onChange={(e) => handleOccurredAtChange(e.target.value)}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
@@ -599,10 +699,21 @@ export function TransactionModal({
                 <input
                   type="month"
                   value={firstInstallmentMonth}
-                  onChange={(e) => setFirstInstallmentMonth(e.target.value)}
+                  onChange={(e) => {
+                    setFirstInstallmentMonth(e.target.value);
+                    setFirstInstallmentTouched(true);
+                  }}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
+              {selectedAccount?.closing_day ? (
+                <p className="col-span-2 text-[11px] text-zinc-400">
+                  Cierre día {selectedAccount.closing_day} → entra en resumen{' '}
+                  <span className="font-medium text-zinc-200">
+                    {defaultCardStatementMonth(occurredAt, selectedAccount.closing_day)}
+                  </span>
+                </p>
+              ) : null}
             </div>
           )}
 

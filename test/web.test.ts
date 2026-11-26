@@ -12,6 +12,7 @@ import {
   buildProjectionTitle,
   buildSummarySubtitles,
 } from '../web/src/utils/dashboardViewModel';
+import { defaultCardStatementMonth } from '../web/src/utils/cardDates';
 import { formatMoney } from '../web/src/utils/format';
 import {
   effectiveTransactionDate,
@@ -482,5 +483,30 @@ describe('dashboardViewModel helpers', () => {
         recurring_brl_total_amount: 300,
       })
     ).toBe('Cuotas: $ 120.000 · Fijos: $ 85.000 · USD: US$ 25,50 · BRL: R$ 300');
+  });
+});
+
+describe('defaultCardStatementMonth', () => {
+  it('assigns month + 1 before or on closing_day and month + 2 after closing_day', () => {
+    expect(defaultCardStatementMonth('2026-11-10', 20)).toBe('2026-12');
+    expect(defaultCardStatementMonth('2026-11-20', 20)).toBe('2026-12');
+    expect(defaultCardStatementMonth('2026-11-21', 20)).toBe('2027-01');
+    expect(defaultCardStatementMonth('2026-12-21', 20)).toBe('2027-02');
+  });
+
+  it('clamps closing_day to February and 30-day month lengths', () => {
+    expect(defaultCardStatementMonth('2026-02-27', 31)).toBe('2026-03');
+    expect(defaultCardStatementMonth('2026-02-28', 31)).toBe('2026-03');
+    expect(defaultCardStatementMonth('2028-02-29', 31)).toBe('2028-03');
+    expect(defaultCardStatementMonth('2026-04-30', 31)).toBe('2026-05');
+    expect(defaultCardStatementMonth('2026-04-30', 29)).toBe('2026-06');
+  });
+
+  it('falls back to month + 1 when closing_day is null, undefined, or out of range, and handles invalid dates safely', () => {
+    expect(defaultCardStatementMonth('2026-11-25', null)).toBe('2026-12');
+    expect(defaultCardStatementMonth('2026-11-25', undefined)).toBe('2026-12');
+    expect(defaultCardStatementMonth('2026-12-15', 0)).toBe('2027-01');
+    expect(defaultCardStatementMonth('2026-12-15', 32)).toBe('2027-01');
+    expect(defaultCardStatementMonth('invalid-date', 20)).toMatch(/^\d{4}-\d{2}$/);
   });
 });

@@ -107,6 +107,7 @@ export interface CreateTransactionPayload {
   currency: string;
   account_id: string;
   to_account_id?: string | null;
+  to_amount?: number | null;
   category_id?: string | null;
   description: string;
   occurred_at: string;
@@ -172,6 +173,7 @@ export function createAccount(payload: {
   color?: string;
   is_default?: number;
   due_day?: number | null;
+  closing_day?: number | null;
 }): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
   return apiFetch('/api/accounts', {
     method: 'POST',
@@ -189,6 +191,7 @@ export function updateAccount(
     color: string;
     is_default: number;
     due_day: number | null;
+    closing_day: number | null;
   }>
 ): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
   return apiFetch(`/api/accounts/${encodeURIComponent(id)}`, {
@@ -225,6 +228,7 @@ export function payCardStatement(
     from_account_id: string;
     amount: number;
     fees_amount?: number;
+    source_amount?: number;
     occurred_at: string;
     description?: string;
   }

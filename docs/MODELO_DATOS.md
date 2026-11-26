@@ -3,7 +3,7 @@
 > **Estado:** Modelo v3.1 agnóstico endurecido sobre v3.0 (`main`).  
 > **Documentos hermanos:** [Arquitectura e Infraestructura](ARQUITECTURA.md) · [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) · [Roadmap y Próximos Pasos](ROADMAP.md).
 
-Este documento describe el modelo contable y de datos definido en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) y [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql), diseñado para funcionar de forma **agnóstica** con cualquier combinación de bancos, billeteras digitales, cuentas de ahorro, efectivo y tarjetas de crédito en las monedas soportadas (`ARS`, `USD` y `BRL`).
+Este documento describe el modelo contable y de datos definido en [`migrations/0001_initial.sql`](../migrations/0001_initial.sql), [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) y [`migrations/0003_cards_closing_and_fx.sql`](../migrations/0003_cards_closing_and_fx.sql), diseñado para funcionar de forma **agnóstica** con cualquier combinación de bancos, billeteras digitales, cuentas de ahorro, efectivo y tarjetas de crédito en las monedas soportadas (`ARS`, `USD` y `BRL`).
 
 ---
 
@@ -35,7 +35,8 @@ Cada cuenta creada por el usuario tiene:
 - `currency`: código de moneda estrictamente acotado a `ARS` (`$`), `USD` (`US$`) o `BRL` (`R$`), validado en API, motor contable, Gemini y UI.
 - `initial_balance`: saldo inicial configurable.
 - `color`: color hexadecimal personalizable para distinguir cuentas en tarjetas y badges de movimientos.
-- `due_day`: *(opcional, `1–31`, solo para `credit_card`)* día de vencimiento del resumen mensual para mostrar alertas cuando un resumen pendiente está vencido.
+- `closing_day`: *(opcional, `1–31`, solo para `credit_card`)* día de cierre del resumen mensual. Determina en qué resumen cae cada compra nueva según su fecha (`day <= clamp(closing_day)` → `mes + 1`; `day > clamp(closing_day)` → `mes + 2`, haciendo *clamp* al último día del mes; si es `null`, usa `mes + 1`).
+- `due_day`: *(opcional, `1–31`, solo para `credit_card`)* día de vencimiento del resumen mensual para mostrar alertas cuando un resumen pendiente o parcial está vencido (`remaining_due` y `status` en `OverdueCardAlert`).
 
 ---
 
@@ -95,8 +96,8 @@ Cada cuenta creada por el usuario tiene:
 | `expense` (cuenta líquida) | `- amount` | — | `+ amount` | `0` | `0` | `0` | `0` |
 | `expense` (`credit_card`) | `- amount` | — | `0` *(al pagar resumen)* | `+ amount` | `0` | `0` | `0` |
 | `income` | `+ amount` | — | `0` | `0` | `+ amount` | `0` | `0` |
-| `transfer` (entre líquidas) | `- amount` | `+ amount` | `0` | `0` | `0` | `0` | `0` |
-| `transfer` (`líquida → credit_card`) | `- amount` | `+ amount` | `+ own_paid` *(desglosado por ítems del resumen)* | `0` | `0` | `0` | `0` |
+| `transfer` (entre líquidas) | `- amount` | `+ (to_amount ?? amount)` | `0` | `0` | `0` | `0` | `0` |
+| `transfer` (`líquida → credit_card`) | `- amount` | `+ (to_amount ?? amount)` | `+ own_paid` *(en moneda origen; desglosado por ítems del resumen)* | `0` | `0` | `0` | `0` |
 | `investment` | `- amount` | — | `0` | `0` | `0` | `+ amount` | `0` |
 | `third_party` | `- amount` | — | `0` | `0` *(en resumen como ajeno)* | `0` | `0` | `+ amount` |
 | `third_party_repayment` | `+ amount` | — | `0` | `0` | `0` | `0` | `- amount` |
@@ -104,9 +105,12 @@ Cada cuenta creada por el usuario tiene:
 
 ### Reglas Contables e Índices Endurecidos (v3.1)
 
-1. **Pagos parciales y múltiples de resumen (`status: 'pending' | 'partial' | 'paid'`):**
+1. **Pagos parciales, múltiples y multimoneda de resumen (`status: 'pending' | 'partial' | 'paid'`):**
    - Varias transferencias hacia la misma `(credit_card, statement_month)` se agregan cronológicamente (`occurred_at`, `created_at`, `id`).
-   - Cada pago absorbe primero el saldo pendiente ajeno (`third_party_total`) y luego prorratea el excedente sobre la porción propia (`own_total`), evitando descontar dos veces gastos de terceros o apagar alertas `is_overdue` antes de cancelar `total_due` (`remaining_due`).
+   - Cada pago absorbe primero el saldo pendiente ajeno (`third_party_total`) y luego prorratea el excedente sobre la porción propia (`own_total`), evitando descontar dos veces gastos de terceros o apagar alertas `is_overdue` antes de cancelar `total_due` (`OverdueCardAlert` expone `remaining_due` y `status: 'pending' | 'partial'`).
+   - Cuando se paga una tarjeta en moneda extranjera desde otra moneda (`source_amount` en el endpoint `/pay-statement`, guardado como `amount` en moneda origen y `to_amount` en la moneda de la tarjeta), el egreso real en métricas `cash` se imputa en la moneda origen (`source_amount`) sin duplicar el consumo en la moneda de la tarjeta.
+2. **Transferencias entre monedas distintas (`transactions.to_amount`):**
+   - `migrations/0003_cards_closing_and_fx.sql` incorpora `transactions.to_amount` (opcional, obligatorio cuando en un `transfer` difieren las monedas de origen y destino), permitiendo registrar el monto exacto acreditado en la cuenta destino.
 2. **Atribución en filtros (`paid_statement_items` y `referencedTransactions`):**
    - Al pagar un resumen en el período actual, `/api/bootstrap` calcula `paid_statement_items` (ítems propios prorrateados efectivamente cubiertos) y adjunta `referencedTransactions` (las compras originales de meses previos o cuotas que no caen en el rango calendario del período) para que filtrar `TransactionList` por categoría o etiqueta coincida exactamente con los gráficos.
 3. **Normalización de cuotas (`installments_total >= 2`):**

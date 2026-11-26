@@ -34,6 +34,7 @@ interface Props {
       from_account_id: string;
       amount: number;
       fees_amount?: number;
+      source_amount?: number;
       occurred_at: string;
       description?: string;
     }
@@ -92,6 +93,7 @@ export function CreditCardsSection({
   const [fromAccountId, setFromAccountId] = useState('');
   const [payAmount, setPayAmount] = useState('');
   const [feesAmount, setFeesAmount] = useState('0');
+  const [sourceAmount, setSourceAmount] = useState('');
   const [payDate, setPayDate] = useState(defaultPayDate);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -102,15 +104,19 @@ export function CreditCardsSection({
   const accMap = new Map(accounts.map((a) => [a.id, a]));
   const catMap = new Map(categories.map((c) => [c.id, c]));
   const liquidAccounts = accounts.filter((a) => a.type !== 'credit_card');
-  const matchingLiquidAccounts = payingStatement
-    ? liquidAccounts.filter((a) => a.currency === payingStatement.currency)
-    : [];
+  const selectedFromAccount = liquidAccounts.find((a) => a.id === fromAccountId);
+  const isCrossCurrencyPay = Boolean(
+    payingStatement && selectedFromAccount && selectedFromAccount.currency !== payingStatement.currency
+  );
   const hasSelectedCard = statements.some((s) => s.account_id === selectedAccount);
 
   const openPayModal = (st: CardStatement) => {
     const matching = liquidAccounts.filter((a) => a.currency === st.currency);
     const preferredFrom =
-      matching.find((a) => a.is_default === 1) ?? matching[0];
+      matching.find((a) => a.is_default === 1) ??
+      matching[0] ??
+      liquidAccounts.find((a) => a.is_default === 1) ??
+      liquidAccounts[0];
     const initialAmount =
       st.status === 'partial'
         ? (st.remaining_due ?? Math.max(0, st.total_due - (st.paid_amount ?? 0)))
@@ -121,6 +127,7 @@ export function CreditCardsSection({
     setFromAccountId(preferredFrom?.id ?? '');
     setPayAmount(String(initialAmount));
     setFeesAmount('0');
+    setSourceAmount('');
     setPayDate(defaultPayDate);
     setError('');
   };
@@ -128,9 +135,9 @@ export function CreditCardsSection({
   const handlePaySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!payingStatement) return;
-    if (!fromAccountId || !matchingLiquidAccounts.some((a) => a.id === fromAccountId)) {
+    if (!fromAccountId || !liquidAccounts.some((a) => a.id === fromAccountId)) {
       setError(
-        `Creá al menos una cuenta líquida en ${payingStatement.currency} para poder registrar el pago de este resumen.`
+        'Creá al menos una cuenta líquida para poder registrar el pago de este resumen.'
       );
       return;
     }
@@ -141,6 +148,16 @@ export function CreditCardsSection({
       return;
     }
 
+    let parsedSourceAmount: number | undefined;
+    if (isCrossCurrencyPay && selectedFromAccount) {
+      const srcAmt = Number(sourceAmount);
+      if (!Number.isFinite(srcAmt) || srcAmt <= 0) {
+        setError(`Ingresá un monto debitado válido en ${selectedFromAccount.currency}.`);
+        return;
+      }
+      parsedSourceAmount = srcAmt;
+    }
+
     setSaving(true);
     setError('');
     try {
@@ -149,6 +166,7 @@ export function CreditCardsSection({
         from_account_id: fromAccountId,
         amount: amt,
         fees_amount: fees,
+        ...(parsedSourceAmount !== undefined ? { source_amount: parsedSourceAmount } : {}),
         occurred_at: payDate,
       });
       setPayingStatement(null);
@@ -283,7 +301,11 @@ export function CreditCardsSection({
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] uppercase text-zinc-500">{st.currency}</p>
+                      <p className="text-[11px] text-zinc-500">
+                        <span className="uppercase">{st.currency}</span>
+                        {cardAccount?.closing_day ? ` · Cierre día ${cardAccount.closing_day}` : ''}
+                        {st.due_day ? ` · Vence día ${st.due_day}` : ''}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5">
@@ -577,17 +599,24 @@ export function CreditCardsSection({
             <form onSubmit={handlePaySubmit} className="mt-4 space-y-3">
               <div>
                 <label className="mb-1 block text-xs text-zinc-400">Cuenta que paga</label>
-                {matchingLiquidAccounts.length === 0 ? (
+                {liquidAccounts.length === 0 ? (
                   <p className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                    Creá al menos una cuenta líquida en {payingStatement.currency} para poder registrar el pago de este resumen.
+                    Creá al menos una cuenta líquida para poder registrar el pago de este resumen.
                   </p>
                 ) : (
                   <select
                     value={fromAccountId}
-                    onChange={(e) => setFromAccountId(e.target.value)}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setFromAccountId(nextId);
+                      const nextAcc = liquidAccounts.find((a) => a.id === nextId);
+                      if (nextAcc && nextAcc.currency !== payingStatement.currency) {
+                        setSourceAmount('');
+                      }
+                    }}
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                   >
-                    {matchingLiquidAccounts.map((a) => (
+                    {liquidAccounts.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.name} ({a.currency} · {formatMoney(a.balance, a.currency)})
                       </option>
@@ -621,6 +650,37 @@ export function CreditCardsSection({
                 </div>
               </div>
 
+              {isCrossCurrencyPay && selectedFromAccount && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-400">
+                    Monto debitado en {selectedFromAccount.currency}
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    required
+                    value={sourceAmount}
+                    onChange={(e) => setSourceAmount(e.target.value)}
+                    placeholder={`Ej: total pagado en ${selectedFromAccount.currency}`}
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  />
+                  {(() => {
+                    const cardTotal = (Number(payAmount) || 0) + (Number(feesAmount) || 0);
+                    const srcAmt = Number(sourceAmount);
+                    if (cardTotal > 0 && Number.isFinite(srcAmt) && srcAmt > 0) {
+                      return (
+                        <p className="mt-1 text-[11px] text-sky-300 tabular-nums">
+                          TC implícito: {formatMoney(srcAmt / cardTotal, selectedFromAccount.currency)} por cada{' '}
+                          {formatMoney(1, payingStatement.currency)}
+                        </p>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
+              )}
+
               <div>
                 <label className="mb-1 block text-xs text-zinc-400">Fecha real de pago</label>
                 <input
@@ -633,13 +693,35 @@ export function CreditCardsSection({
               </div>
 
               <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300 tabular-nums">
-                Total a debitar de cuenta:{' '}
-                <strong className="text-white">
-                  {formatMoney(
-                    (Number(payAmount) || 0) + (Number(feesAmount) || 0),
-                    payingStatement.currency
-                  )}
-                </strong>
+                {isCrossCurrencyPay && selectedFromAccount ? (
+                  <div className="space-y-1">
+                    <div>
+                      A acreditar en tarjeta:{' '}
+                      <strong className="text-white">
+                        {formatMoney(
+                          (Number(payAmount) || 0) + (Number(feesAmount) || 0),
+                          payingStatement.currency
+                        )}
+                      </strong>
+                    </div>
+                    <div>
+                      Total a debitar de {selectedFromAccount.name}:{' '}
+                      <strong className="text-white">
+                        {formatMoney(Number(sourceAmount) || 0, selectedFromAccount.currency)}
+                      </strong>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    Total a debitar de cuenta:{' '}
+                    <strong className="text-white">
+                      {formatMoney(
+                        (Number(payAmount) || 0) + (Number(feesAmount) || 0),
+                        payingStatement.currency
+                      )}
+                    </strong>
+                  </>
+                )}
               </div>
 
               {error && <p className="text-xs text-rose-400">{error}</p>}
@@ -654,7 +736,7 @@ export function CreditCardsSection({
                 </button>
                 <button
                   type="submit"
-                  disabled={saving || matchingLiquidAccounts.length === 0}
+                  disabled={saving || liquidAccounts.length === 0}
                   className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                 >
                   {saving ? 'Registrando...' : 'Confirmar pago'}
