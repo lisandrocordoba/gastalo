@@ -24,11 +24,11 @@ flowchart LR
 1. **Cuando mandás un mensaje por Telegram:**
    - Telegram envía un POST a `https://<tu-worker>.workers.dev/webhook/telegram`.
    - El Worker verifica de forma *fail-closed* el header secreto (`TELEGRAM_WEBHOOK_SECRET`, comparación en tiempo constante vía SHA-256) y tu ID de usuario + chat privado (`ALLOWED_TELEGRAM_USER_ID`, `from.id === allowedId` y `chat.id === allowedId`), deduplica reintentos por `telegram_message_id` (`idx_transactions_telegram_message_id`), responde `200 OK` al instante para que Telegram no reintente, y procesa el mensaje en segundo plano (`waitUntil`, con un tope de 30 segundos en Cloudflare).
-   - Llama a **Gemini (`gemini-3.5-flash-lite`)** con esquema JSON estricto usando **las cuentas, categorías y etiquetas reales cargadas en tu base D1** para extraer movimientos (`record`), consultas (`query`) o altas de configuración (`manage`: crear cuentas, tarjetas, categorías o etiquetas).
-   - Guarda en **D1** y te responde por Telegram con botones interactivos (`✅ OK`, `✏️ Categoría`, `🔄 Cuenta`, `🏷️ Etiquetas`, `🗑️ Borrar`).
+   - Llama a **Gemini (`gemini-3.5-flash-lite`)** con esquema JSON estricto usando **las cuentas, categorías y etiquetas reales cargadas en tu base D1** para extraer movimientos (`record`, incluidas transferencias/pagos multimoneda con `to_amount`), consultas multi-mes (`query` con `query_month`), altas de configuración y gastos fijos (`manage`: crear cuentas, tarjetas, categorías, etiquetas o recurrentes), o informar acciones reservadas al Dashboard (`unsupported`). Ver detalle completo en [Bot de Telegram y Staging](TELEGRAM_BOT.md).
+   - Guarda en **D1** y te responde por Telegram con botones interactivos (`✅ OK`, `✏️ Categoría`, `🔄 Cuenta`, `🏷️ Etiquetas`, `🗑️ Borrar` / `🗑️ Eliminar`).
 2. **Cuando abrís el Dashboard (PWA o Mini App):**
    - El mismo Worker sirve los archivos estáticos compilados de React (`web/dist`) sin pasar por Node ni gastar cómputo innecesario.
-   - Las llamadas a `/api/*` ejecutan el Worker, validan tu identidad de forma *fail-closed* (`DASHBOARD_TOKEN` o firma criptográfica HMAC de Telegram `initData` con `auth_date` obligatorio) y consultan **D1**. En particular, `/api/bootstrap` lee todo el estado en un **snapshot único consistente** (`loadAllDataSnapshot`, 6 consultas en `db.batch`) para calcular saldos, resúmenes de tarjeta, `paid_statement_items`, `referencedTransactions`, historial y proyección futura.
+   - Las llamadas a `/api/*` ejecutan el Worker, validan tu identidad de forma *fail-closed* (`DASHBOARD_TOKEN` o firma criptográfica HMAC de Telegram `initData` con `auth_date` obligatorio) y consultan **D1**. En particular, `/api/bootstrap` usa `loadBootstrapSnapshot` (pushdown SQL + agregaciones en `db.batch`) para calcular saldos, resúmenes de tarjeta, `paid_statement_items`, `referencedTransactions`, historial y proyección futura dentro del límite de **10 ms CPU** del plan Workers Free.
 
 ---
 
@@ -42,9 +42,10 @@ flowchart LR
 ### B. Cloudflare D1 (`migrations/`)
 - Es una base de datos **SQLite administrada en la nube** (`wallet-db`).
 - Incluye [`migrations/0001_initial.sql`](../migrations/0001_initial.sql) (esquema v3 limpio), [`migrations/0002_indexes.sql`](../migrations/0002_indexes.sql) (índices en `to_account_id`, `recurring_items(account_id)` y `telegram_message_id` para deduplicación de webhook) y [`migrations/0003_cards_closing_and_fx.sql`](../migrations/0003_cards_closing_and_fx.sql) (`accounts.closing_day` y `transactions.to_amount`).
-- Tenés **dos bases completamente aisladas**:
+- Tenés **tres ambientes completamente aislados**:
   1. **Local** (`.wrangler/state/v3/d1`): vive en tu PC; se usa al correr `npm run dev` y se actualiza con `npm run db:migrate:local`.
-  2. **Remota / Producción** (en Cloudflare): vive en la nube; solo cambia si corrés `npm run db:migrate:remote` o si usás la app desplegada.
+  2. **Staging (`[env.staging]` / `wallet-db-staging`):** Worker + D1 + segundo bot de Telegram de pruebas (`npm run db:migrate:staging` y `npm run deploy:staging`; guía en [Bot de Telegram y Staging](TELEGRAM_BOT.md)).
+  3. **Remota / Producción (`wallet-db`):** vive en la nube; solo cambia si corrés `npm run db:migrate:remote` o si usás la app desplegada.
 - Nunca se borra ni se pisa código de producción por probar cosas en local.
 
 ### C. Workers Static Assets (`web/dist`)
@@ -121,7 +122,7 @@ El esquema consolidado en [`migrations/0001_initial.sql`](../migrations/0001_ini
 - **`transactions`**: soporta 7 tipos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), transferencias y pagos de tarjeta entre monedas distintas (`to_amount` / `source_amount` con imputación `cash` en moneda origen sin doble conteo), cuotas en tarjeta (`installments_total >= 2`, `first_installment_month`), `statement_month` para pagos reales de resumen (Opción B, con estado `pending`/`partial`/`paid`), `budget_month` contable opcional, terceros y compras compartidas (`linked_group_id`).
 - **`tags` / `transaction_tags` / `recurring_items`**: etiquetado transversal N:M y proyección futura de cuotas + gastos fijos mensuales / suscripciones con mes de inicio (`start_month`).
 
-Para el detalle completo de reglas contables, casos de uso y evolución, consultá [Modelo de Datos y Casos de Uso](MODELO_DATOS.md), [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) y [Roadmap y Próximos Pasos](ROADMAP.md).
+Para el detalle completo de reglas contables, casos de uso, alcance del bot y evolución, consultá [Bot de Telegram y Staging](TELEGRAM_BOT.md), [Modelo de Datos y Casos de Uso](MODELO_DATOS.md), [Plan de Evolución v3 Agnóstico](PLAN_V3_AGNOSTICO.md) y [Roadmap y Próximos Pasos](ROADMAP.md).
 
 ---
 

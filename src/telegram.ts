@@ -10,11 +10,13 @@ import {
   ConflictError,
   createAccount,
   createCategory,
+  createRecurringItem,
   createSharedPurchase,
   createTag,
   createTransaction,
   deleteAccount,
   deleteCategory,
+  deleteRecurringItem,
   deleteTag,
   deleteTransaction,
   getFutureProjection,
@@ -22,6 +24,7 @@ import {
   getTransactionById,
   listAccountsWithBalances,
   listCategories,
+  listRecurringItems,
   listTags,
   listTransactions,
   updateTransaction,
@@ -33,6 +36,7 @@ import {
   currentMonthInTimezone,
   defaultColorForAccountType,
   formatCurrency,
+  isValidYearMonth,
   normalizeCurrency,
   todayInTimezone,
 } from './utils';
@@ -235,6 +239,10 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function dashboardKeyboard(env: Env, label = '📊 Abrir Dashboard'): InlineButton[][] | undefined {
+  return env.DASHBOARD_URL ? [[{ text: label, web_app: { url: env.DASHBOARD_URL } }]] : undefined;
+}
+
 function findSavingsAccount(
   accounts: AccountWithBalance[],
   excludeAccountId: string,
@@ -304,7 +312,8 @@ function formatTransactionMessage(
   const catMap = new Map(categories.map((c) => [c.id, c]));
 
   const fromAcc = accMap.get(tx.account_id)?.name ?? tx.account_id;
-  const toAcc = tx.to_account_id ? (accMap.get(tx.to_account_id)?.name ?? tx.to_account_id) : null;
+  const toAccObj = tx.to_account_id ? accMap.get(tx.to_account_id) : undefined;
+  const toAcc = tx.to_account_id ? (toAccObj?.name ?? tx.to_account_id) : null;
   const cat = tx.category_id ? catMap.get(tx.category_id) : null;
 
   const lines = [
@@ -315,6 +324,9 @@ function formatTransactionMessage(
 
   if (tx.type === 'transfer' && toAcc) {
     lines.push(`• <b>Ruta:</b> ${escapeHtml(fromAcc)} → ${escapeHtml(toAcc)}`);
+    if (toAccObj && tx.to_amount && tx.to_amount > 0 && toAccObj.currency !== tx.currency) {
+      lines.push(`• <b>Acreditado:</b> ${formatCurrency(tx.to_amount, toAccObj.currency)}`);
+    }
   } else {
     lines.push(`• <b>Cuenta:</b> ${escapeHtml(fromAcc)}`);
     if (cat) {
@@ -416,8 +428,11 @@ function formatOverdueAlertsLines(alerts: OverdueCardAlert[]): string[] {
   if (alerts.length === 0) return [];
   const lines = ['\n🚨 <b>Resúmenes vencidos sin pagar:</b>'];
   for (const a of alerts) {
+    const remaining = a.remaining_due ?? a.total_due;
+    const partialBadge =
+      a.status === 'partial' ? ` (parcial, total ${formatCurrency(a.total_due, a.currency)})` : '';
     lines.push(
-      `• ${escapeHtml(a.account_name)} (${a.statement_month}): venció ${a.due_date} · ${formatCurrency(a.total_due, a.currency)}`
+      `• ${escapeHtml(a.account_name)} (${a.statement_month}): venció ${a.due_date} · ${formatCurrency(remaining, a.currency)}${partialBadge}`
     );
   }
   return lines;
@@ -426,37 +441,41 @@ function formatOverdueAlertsLines(alerts: OverdueCardAlert[]): string[] {
 async function handleCommand(env: Env, chatId: number, command: string): Promise<void> {
   const tz = env.TIMEZONE || 'America/Argentina/Buenos_Aires';
   const defaultCurrency = normalizeCurrency(env.DEFAULT_CURRENCY, 'ARS') ?? 'ARS';
-  const cmd = command.split(/\s+/)[0].toLowerCase().replace(/@\w+$/, '');
+  const parts = command.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase().replace(/@\w+$/, '');
+  const arg = parts[1]?.trim() ?? '';
 
   if (cmd === '/start' || cmd === '/ayuda' || cmd === '/help') {
     const text = [
       '👋 <b>¡Hola! Soy tu asistente financiero personal.</b>',
       '',
-      '<b>1. Configurá tus cuentas por chat o desde el Dashboard:</b>',
+      '<b>1. Configuración rápida y gastos fijos por chat:</b>',
       '• <i>"Creá mi cuenta principal Banco Nación en ARS"</i>',
-      '• <i>"Agregá tarjeta de crédito Visa en pesos"</i>',
-      '• <i>"Creá cuenta de ahorros Reservas en ARS"</i>',
+      '• <i>"Agregá tarjeta de crédito Visa en pesos, cierra el 27 y vence el 9"</i>',
+      '• <i>"Agregá gasto fijo en Visa USD: Hosting 5 USD, arranca en diciembre"</i>',
       '• <i>"Agregá la categoría Gimnasio"</i> · <i>"Creá la etiqueta #viaje"</i>',
       '',
       '<b>2. Cargá tus movimientos con texto, audio o foto:</b>',
       '• <b>Gastos y tags:</b> <i>"Café 3500 hormiga"</i>, <i>"Supermercado 45k"</i>',
-      '• <b>Cuotas y compartidos:</b> <i>"Zapatillas 90k en 3 cuotas con Visa"</i>, <i>"Cena 40k mitad con Juan"</i>',
-      '• <b>Inversión / Transferencia:</b> <i>"Invertí 100k en CEDEAR"</i>',
-      '• <b>Consultas:</b> <i>"¿Cuánto gasté este mes?"</i>',
+      '• <b>Cuotas y compartidos:</b> <i>"Zapatillas 90k en 3 cuotas con Visa"</i>, <i>"Cena 40k mitad con Ana"</i>',
+      '• <b>Transferencias / pagos TC multimoneda:</b> <i>"Pagué 6,69 USD de Visa USD con $10.350 desde Billetera"</i>',
+      '• <b>Consultas (mes actual o pasado):</b> <i>"¿Cuánto gasté este mes?"</i>, <i>"¿Cómo me fue el mes pasado?"</i>',
       '',
       '<b>Comandos útiles:</b>',
       '/cuentas — Ver y gestionar cuentas y tarjetas',
-      '/resumen — Resumen del período actual',
+      '/fijos — Listar gastos fijos y suscripciones activas',
+      '/resumen [YYYY-MM] — Resumen del mes actual o indicado',
       '/saldos — Saldos de todas tus cuentas y tarjetas',
       '/futuro — Cuotas y gastos fijos próximos vs. reservas',
       '/ultimos — Últimos 5 movimientos',
+      '',
+      '⛔ <b>Qué NO hace el bot (usá el Dashboard):</b>',
+      '• Editar o borrar movimientos viejos (solo botones del último registro)',
+      '• Editar, pausar o borrar cuentas, tarjetas, categorías, etiquetas o fijos existentes',
+      '• Conciliar saldos manualmente, desglosar sellos/intereses en pago TC o exportar CSV',
     ].join('\n');
 
-    const keyboard: InlineButton[][] | undefined = env.DASHBOARD_URL
-      ? [[{ text: '📊 Abrir Dashboard', web_app: { url: env.DASHBOARD_URL } }]]
-      : undefined;
-
-    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, text, keyboard);
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, text, dashboardKeyboard(env));
     return;
   }
 
@@ -464,12 +483,51 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
     const accounts = await listAccountsWithBalances(env.DB);
     const lines = [formatBalancesText(accounts, defaultCurrency)];
     lines.push(
-      '\n⚙️ <b>Para crear por chat:</b>\n• <i>"Creá cuenta Billetera Digital en ARS"</i>\n• <i>"Agregá tarjeta Mastercard en USD"</i>\n• <i>"Creá categoría Mascotas"</i> o <i>"Creá etiqueta #viaje"</i>'
+      '\n⚙️ <b>Para crear por chat:</b>\n• <i>"Creá cuenta Billetera Digital en ARS"</i>\n• <i>"Agregá tarjeta Mastercard en USD, cierra el 27, vence el 9"</i>\n• <i>"Agregá gasto fijo en Billetera: Internet 35k"</i>\n• <i>"Creá categoría Mascotas"</i> o <i>"Creá etiqueta #viaje"</i>'
     );
-    const keyboard: InlineButton[][] | undefined = env.DASHBOARD_URL
-      ? [[{ text: '⚙️ Configurar en Dashboard', web_app: { url: env.DASHBOARD_URL } }]]
-      : undefined;
-    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'), keyboard);
+    await sendMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      lines.join('\n'),
+      dashboardKeyboard(env, '⚙️ Configurar en Dashboard')
+    );
+    return;
+  }
+
+  if (cmd === '/fijos' || cmd === '/suscripciones') {
+    const [items, accounts, categories] = await Promise.all([
+      listRecurringItems(env.DB),
+      listAccountsWithBalances(env.DB),
+      listCategories(env.DB),
+    ]);
+    const accMap = new Map(accounts.map((a) => [a.id, a.name]));
+    const catMap = new Map(categories.map((c) => [c.id, `${c.icon} ${c.name}`]));
+    const active = items.filter((r) => r.active === 1);
+    const pausedCount = items.length - active.length;
+
+    const lines = ['🔁 <b>Gastos fijos y suscripciones</b>\n'];
+    if (active.length === 0) {
+      lines.push('No tenés gastos fijos activos configurados.');
+    } else {
+      for (const r of active) {
+        const sign = r.type === 'income' ? '+' : '-';
+        const accName = accMap.get(r.account_id) ?? r.account_id;
+        const catLabel = r.category_id ? (catMap.get(r.category_id) ?? r.category_id) : 'Sin categoría';
+        const extras: string[] = [accName, catLabel];
+        if (r.start_month) extras.push(`desde ${r.start_month}`);
+        if (r.day_of_month) extras.push(`día ${r.day_of_month}`);
+        lines.push(
+          `${sign} <b>${formatCurrency(r.amount, r.currency)}</b> — ${escapeHtml(r.name)}\n   <i>${escapeHtml(extras.join(' · '))}</i>`
+        );
+      }
+    }
+    if (pausedCount > 0) {
+      lines.push(`\n⏸️ <i>Hay ${pausedCount} pausado(s) (editables en el Dashboard).</i>`);
+    }
+    lines.push(
+      '\n💡 <i>Para agregar por chat: "Agregá gasto fijo en Visa USD: Hosting 5 USD, arranca en 2026-12"</i>'
+    );
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'), dashboardKeyboard(env));
     return;
   }
 
@@ -491,7 +549,15 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
 
   if (cmd === '/resumen' || cmd === '/mes') {
     const today = todayInTimezone(tz);
-    const month = today.slice(0, 7);
+    if (arg && !isValidYearMonth(arg)) {
+      await sendMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        '⚠️ Formato de mes inválido. Usá <code>/resumen YYYY-MM</code> (ej: <code>/resumen 2026-10</code>).'
+      );
+      return;
+    }
+    const month = arg || today.slice(0, 7);
     const summary = await getMonthSummary(env.DB, month, 'cash', today);
     const lines = [
       `📅 <b>Resumen ${month}</b>\n`,
@@ -856,6 +922,18 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
     return;
   }
 
+  if (action === 'delrec') {
+    const deleted = await deleteRecurringItem(env.DB, txId);
+    await editMessageText(
+      token,
+      msg.chat.id,
+      msg.message_id,
+      deleted ? '🗑️ <i>Gasto fijo eliminado.</i>' : '⚠️ <i>El gasto fijo ya no existe.</i>'
+    );
+    await answerCallbackQuery(token, cb.id, deleted ? 'Eliminado' : 'No encontrado');
+    return;
+  }
+
   if (action === 'resv') {
     const [tx, accounts, categories] = await Promise.all([
       getTransactionById(env.DB, txId),
@@ -1115,6 +1193,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
             color: defaultColorForAccountType(op.account_type),
             is_default: op.is_default ? 1 : 0,
             due_day: op.due_day,
+            closing_day: op.closing_day ?? null,
           });
           const typeLabel =
             created.type === 'credit_card'
@@ -1130,6 +1209,9 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
             `• <b>Tipo:</b> ${typeLabel} (${escapeHtml(created.currency)})`,
             `• <b>Saldo inicial:</b> ${formatCurrency(created.initial_balance, created.currency)}`,
           ];
+          if (created.closing_day) {
+            infoLines.push(`• <b>Cierre:</b> día ${created.closing_day}`);
+          }
           if (created.due_day) {
             infoLines.push(`• <b>Vencimiento:</b> día ${created.due_day}`);
           }
@@ -1170,18 +1252,74 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
             `✅ <b>Etiqueta creada:</b> #${escapeHtml(created.name)}`,
             keyboard
           );
+        } else if (op.action === 'create_recurring') {
+          const created = await createRecurringItem(env.DB, {
+            name: op.name,
+            type: op.recurring_type,
+            amount: op.amount,
+            currency: op.currency,
+            account_id: op.account_id,
+            category_id: op.category_id,
+            day_of_month: op.day_of_month,
+            start_month: op.start_month,
+            active: 1,
+          });
+          const accName = accounts.find((a) => a.id === created.account_id)?.name ?? created.account_id;
+          const cat = created.category_id
+            ? categories.find((c) => c.id === created.category_id)
+            : undefined;
+          const header =
+            created.type === 'income' ? '💚 <b>Ingreso fijo creado</b>' : '🔁 <b>Gasto fijo creado</b>';
+          const infoLines = [
+            header,
+            `• <b>Nombre:</b> ${escapeHtml(created.name)}`,
+            `• <b>Monto:</b> ${formatCurrency(created.amount, created.currency)}`,
+            `• <b>Cuenta:</b> ${escapeHtml(accName)}`,
+          ];
+          if (cat) {
+            infoLines.push(`• <b>Categoría:</b> ${escapeHtml(cat.icon)} ${escapeHtml(cat.name)}`);
+          }
+          if (created.start_month) {
+            infoLines.push(`• <b>Inicio:</b> ${created.start_month}`);
+          }
+          if (created.day_of_month) {
+            infoLines.push(`• <b>Día del mes:</b> ${created.day_of_month}`);
+          }
+          const delRecCb = `delrec:${created.id}`;
+          const keyboard =
+            byteLen(delRecCb) <= TELEGRAM_CALLBACK_MAX_BYTES
+              ? [[{ text: '🗑️ Eliminar', callback_data: delRecCb }]]
+              : undefined;
+          await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, infoLines.join('\n'), keyboard);
         }
       }
       return;
     }
 
+    if (parsed.intent === 'unsupported') {
+      const msgText = [
+        '🚫 <b>Acción no disponible por Telegram</b>',
+        '',
+        escapeHtml(
+          parsed.reply_text ||
+            'Esta operación se gestiona directamente desde el Dashboard web para evitar errores sobre tu historial o configuración.'
+        ),
+      ].join('\n');
+      await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, msgText, dashboardKeyboard(env));
+      return;
+    }
+
     if (parsed.intent === 'query') {
-      const month = today.slice(0, 7);
-      const nextMonth = addMonths(month, 1);
-      const [summary, recent, projection] = await Promise.all([
-        getMonthSummary(env.DB, month, 'cash', today),
-        listTransactions(env.DB, { month, limit: 30 }),
+      const targetMonth =
+        parsed.query_month && isValidYearMonth(parsed.query_month)
+          ? parsed.query_month
+          : today.slice(0, 7);
+      const nextMonth = addMonths(today.slice(0, 7), 1);
+      const [summary, recent, projection, recurringItems] = await Promise.all([
+        getMonthSummary(env.DB, targetMonth, 'cash', today),
+        listTransactions(env.DB, { month: targetMonth, limit: 30 }),
         getFutureProjection(env.DB, nextMonth, 3, defaultCurrency),
+        listRecurringItems(env.DB),
       ]);
       const answer = await answerFinancialQuery(env, {
         question: parsed.transcribed_query || text || 'Resumen del mes',
@@ -1189,6 +1327,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
         recentTransactions: recent,
         accounts: summary.accounts,
         projection,
+        recurringItems,
         defaultCurrency,
       });
       await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, escapeHtml(answer));
@@ -1196,9 +1335,6 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
     }
 
     if (accounts.length === 0) {
-      const keyboard: InlineButton[][] | undefined = env.DASHBOARD_URL
-        ? [[{ text: '⚙️ Configurar en Dashboard', web_app: { url: env.DASHBOARD_URL } }]]
-        : undefined;
       await sendMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
@@ -1211,7 +1347,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
           '',
           'O configuralas desde el Dashboard.',
         ].join('\n'),
-        keyboard
+        dashboardKeyboard(env, '⚙️ Configurar en Dashboard')
       );
       return;
     }
@@ -1271,6 +1407,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
         currency: draft.currency,
         account_id: draft.account_id,
         to_account_id: draft.to_account_id,
+        to_amount: draft.to_amount ?? null,
         category_id: draft.category_id,
         description: draft.description,
         occurred_at: draft.occurred_at,
