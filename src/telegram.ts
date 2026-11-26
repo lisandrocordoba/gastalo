@@ -1,7 +1,14 @@
 import type { AccountWithBalance, Category, Env, Tag, Transaction } from './types';
 import {
+  ConflictError,
+  createAccount,
+  createCategory,
   createSharedPurchase,
+  createTag,
   createTransaction,
+  deleteAccount,
+  deleteCategory,
+  deleteTag,
   deleteTransaction,
   getFutureProjection,
   getMonthSummary,
@@ -17,6 +24,7 @@ import {
   addMonths,
   arrayBufferToBase64,
   currentMonthInTimezone,
+  defaultColorForAccountType,
   formatCurrency,
   todayInTimezone,
 } from './utils';
@@ -143,8 +151,23 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function findSavingsAccount(
+  accounts: AccountWithBalance[],
+  excludeAccountId: string,
+  currency?: string
+): AccountWithBalance | undefined {
+  const candidates = accounts.filter((a) => a.type === 'savings' && a.id !== excludeAccountId);
+  if (candidates.length === 0) return undefined;
+  if (currency) {
+    const exact = candidates.find((a) => a.currency === currency);
+    if (exact) return exact;
+  }
+  return candidates[0];
+}
+
 function mainTxKeyboard(
   tx: Transaction,
+  accounts: AccountWithBalance[],
   options: { movedToReservas?: boolean } = {}
 ): InlineButton[][] {
   const row1: InlineButton[] = [{ text: '✅ OK', callback_data: `ok:${tx.id}` }];
@@ -159,12 +182,9 @@ function mainTxKeyboard(
 
   const rows: InlineButton[][] = [row1, row2];
 
-  if (
-    tx.type === 'third_party_repayment' &&
-    tx.account_id === 'mp' &&
-    !options.movedToReservas
-  ) {
-    rows.push([{ text: '🛡️ Pasar a Reservas', callback_data: `resv:${tx.id}` }]);
+  const savingsAcc = findSavingsAccount(accounts, tx.account_id, tx.currency);
+  if (tx.type === 'third_party_repayment' && savingsAcc && !options.movedToReservas) {
+    rows.push([{ text: `🛡️ Pasar a ${savingsAcc.name}`, callback_data: `resv:${tx.id}` }]);
   }
 
   rows.push([{ text: '🗑️ Borrar', callback_data: `del:${tx.id}` }]);
@@ -242,15 +262,19 @@ function formatTransactionMessage(
 }
 
 function formatBalancesText(accounts: AccountWithBalance[]): string {
+  if (accounts.length === 0) {
+    return '🏦 <b>Sin cuentas configuradas</b>\n\nTodavía no creaste ninguna cuenta o tarjeta. Creá una escribiendo por ejemplo:\n<i>"Creá mi cuenta principal Billetera en ARS"</i>';
+  }
+
   const lines = ['🏦 <b>Saldos actuales</b>\n'];
   let liquidArs = 0;
   let savingsArs = 0;
   let debtArs = 0;
-  const usdAccounts: AccountWithBalance[] = [];
+  const otherCurrencies: AccountWithBalance[] = [];
 
   for (const acc of accounts) {
-    if (acc.currency === 'USD') {
-      usdAccounts.push(acc);
+    if (acc.currency !== 'ARS') {
+      otherCurrencies.push(acc);
       continue;
     }
     const emoji =
@@ -261,22 +285,29 @@ function formatBalancesText(accounts: AccountWithBalance[]): string {
           : acc.type === 'cash'
             ? '💵'
             : '🟦';
-    lines.push(`${emoji} <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, acc.currency)}`);
+    const defaultBadge = acc.is_default ? ' ⭐' : '';
+    lines.push(
+      `${emoji} <b>${escapeHtml(acc.name)}${defaultBadge}:</b> ${formatCurrency(acc.balance, acc.currency)}`
+    );
     if (acc.type === 'wallet' || acc.type === 'cash') liquidArs += acc.balance;
     else if (acc.type === 'savings') savingsArs += acc.balance;
     else if (acc.type === 'credit_card') debtArs += acc.balance;
   }
 
   lines.push('');
-  lines.push(`💧 <b>Disponible ARS (MP + Efectivo):</b> ${formatCurrency(liquidArs)}`);
-  lines.push(`🛡️ <b>Reservas ARS:</b> ${formatCurrency(savingsArs)}`);
+  lines.push(`💧 <b>Disponible (Cuentas + Efectivo):</b> ${formatCurrency(liquidArs)}`);
+  if (savingsArs !== 0 || accounts.some((a) => a.type === 'savings' && a.currency === 'ARS')) {
+    lines.push(`🛡️ <b>Reservas / Ahorros:</b> ${formatCurrency(savingsArs)}`);
+  }
   lines.push(`📊 <b>Patrimonio neto ARS:</b> ${formatCurrency(liquidArs + savingsArs + debtArs)}`);
 
-  const nonZeroUsd = usdAccounts.filter((a) => Math.abs(a.balance) >= 0.01);
-  if (nonZeroUsd.length > 0) {
+  if (otherCurrencies.length > 0) {
     lines.push('');
-    for (const acc of nonZeroUsd) {
-      lines.push(`💵 <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, 'USD')}`);
+    for (const acc of otherCurrencies) {
+      const emoji = acc.type === 'credit_card' ? '💳' : '💵';
+      lines.push(
+        `${emoji} <b>${escapeHtml(acc.name)}:</b> ${formatCurrency(acc.balance, acc.currency)}`
+      );
     }
   }
 
@@ -285,23 +316,30 @@ function formatBalancesText(accounts: AccountWithBalance[]): string {
 
 async function handleCommand(env: Env, chatId: number, command: string): Promise<void> {
   const tz = env.TIMEZONE || 'America/Argentina/Buenos_Aires';
+  const defaultCurrency = env.DEFAULT_CURRENCY || 'ARS';
   const cmd = command.split(/\s+/)[0].toLowerCase();
 
   if (cmd === '/start' || cmd === '/ayuda' || cmd === '/help') {
     const text = [
-      '👋 <b>Hola! Soy tu Gasti personal (v2).</b>',
+      '👋 <b>¡Hola! Soy tu asistente financiero personal.</b>',
       '',
-      'Podés mandarme gastos, ingresos, inversiones o transferencias:',
-      '• <b>Consumo y tags:</b> <i>"Cancha fútbol 12k"</i>, <i>"Alfajor 2500 hormiga"</i>, <i>"Carnicería 30k para casa"</i>',
-      '• <b>Cuotas y compartidos:</b> <i>"Regalo 44000 en 3 cuotas BBVA mitad de Jere"</i>',
-      '• <b>Inversión:</b> <i>"Invertí 150k en BTC"</i>',
-      '• <b>Audio / Foto:</b> Nota de voz o foto de ticket/comprobante',
-      '• <b>Consultas:</b> <i>"¿Cuánto gasté en hormiga este mes?"</i>',
+      '<b>1. Configurá tus cuentas por chat o desde el Dashboard:</b>',
+      '• <i>"Creá mi cuenta principal Banco Nación en ARS"</i>',
+      '• <i>"Agregá tarjeta de crédito Visa en pesos"</i>',
+      '• <i>"Creá cuenta de ahorros Reservas en ARS"</i>',
+      '• <i>"Agregá la categoría Gimnasio"</i> · <i>"Creá la etiqueta #viaje"</i>',
+      '',
+      '<b>2. Cargá tus movimientos con texto, audio o foto:</b>',
+      '• <b>Gastos y tags:</b> <i>"Café 3500 hormiga"</i>, <i>"Supermercado 45k"</i>',
+      '• <b>Cuotas y compartidos:</b> <i>"Zapatillas 90k en 3 cuotas con Visa"</i>, <i>"Cena 40k mitad con Juan"</i>',
+      '• <b>Inversión / Transferencia:</b> <i>"Invertí 100k en CEDEAR"</i>',
+      '• <b>Consultas:</b> <i>"¿Cuánto gasté este mes?"</i>',
       '',
       '<b>Comandos útiles:</b>',
-      '/resumen — Resumen del mes actual (categorías, tags, invertido)',
-      '/saldos — Saldos de MP, Reservas, TC BBVA, TC MP y Efectivo',
-      '/futuro — Cuotas + gastos fijos de los próximos 3 meses vs. Reservas',
+      '/cuentas — Ver y gestionar cuentas y tarjetas',
+      '/resumen — Resumen del período actual',
+      '/saldos — Saldos de todas tus cuentas y tarjetas',
+      '/futuro — Cuotas y gastos fijos próximos vs. reservas',
       '/ultimos — Últimos 5 movimientos',
     ].join('\n');
 
@@ -310,6 +348,19 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
       : undefined;
 
     await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, text, keyboard);
+    return;
+  }
+
+  if (cmd === '/cuentas' || cmd === '/config') {
+    const accounts = await listAccountsWithBalances(env.DB);
+    const lines = [formatBalancesText(accounts)];
+    lines.push(
+      '\n⚙️ <b>Para crear por chat:</b>\n• <i>"Creá cuenta Billetera Digital en ARS"</i>\n• <i>"Agregá tarjeta Mastercard en USD"</i>\n• <i>"Creá categoría Mascotas"</i> o <i>"Creá etiqueta #viaje"</i>'
+    );
+    const keyboard: InlineButton[][] | undefined = env.DASHBOARD_URL
+      ? [[{ text: '⚙️ Configurar en Dashboard', web_app: { url: env.DASHBOARD_URL } }]]
+      : undefined;
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n'), keyboard);
     return;
   }
 
@@ -335,6 +386,9 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
       `💚 <b>Ingresos:</b> ${formatCurrency(summary.income)}`,
       `💸 <b>Gastos consumo:</b> ${formatCurrency(summary.expense)}`,
     ];
+    if (summary.card_purchases > 0) {
+      lines.push(`💳 <b>Compras con TC:</b> ${formatCurrency(summary.card_purchases)}`);
+    }
     if (summary.investment > 0) {
       lines.push(`🪙 <b>Invertido:</b> ${formatCurrency(summary.investment)}`);
     }
@@ -371,7 +425,7 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
 
   if (cmd === '/futuro') {
     const nextMonth = addMonths(currentMonthInTimezone(tz), 1);
-    const proj = await getFutureProjection(env.DB, nextMonth, 3);
+    const proj = await getFutureProjection(env.DB, nextMonth, 3, defaultCurrency);
     const lines = ['🔮 <b>Proyección próximos 3 meses</b>\n'];
 
     for (const m of proj.months) {
@@ -386,7 +440,7 @@ async function handleCommand(env: Env, chatId: number, command: string): Promise
     }
 
     lines.push('');
-    lines.push(`🛡️ <b>Saldo en MP Reservas:</b> ${formatCurrency(proj.reservas_balance)}`);
+    lines.push(`🛡️ <b>Saldo en reservas/ahorros:</b> ${formatCurrency(proj.reservas_balance)}`);
     if (proj.next_month_coverage_delta >= 0) {
       lines.push(
         `✅ <b>Próximo mes cubierto</b> (sobran ${formatCurrency(proj.next_month_coverage_delta)})`
@@ -576,6 +630,52 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
     return;
   }
 
+  if (action === 'delacc') {
+    try {
+      const deleted = await deleteAccount(env.DB, txId);
+      await editMessageText(
+        token,
+        msg.chat.id,
+        msg.message_id,
+        deleted ? '🗑️ <i>Cuenta eliminada.</i>' : '⚠️ <i>La cuenta ya no existe.</i>'
+      );
+      await answerCallbackQuery(token, cb.id, deleted ? 'Eliminada' : 'No encontrada');
+    } catch (err) {
+      const msgErr = err instanceof ConflictError ? err.message : 'No se pudo eliminar la cuenta';
+      await answerCallbackQuery(token, cb.id, msgErr.slice(0, 180));
+    }
+    return;
+  }
+
+  if (action === 'delcat') {
+    try {
+      const deleted = await deleteCategory(env.DB, txId);
+      await editMessageText(
+        token,
+        msg.chat.id,
+        msg.message_id,
+        deleted ? '🗑️ <i>Categoría eliminada.</i>' : '⚠️ <i>La categoría ya no existe.</i>'
+      );
+      await answerCallbackQuery(token, cb.id, deleted ? 'Eliminada' : 'No encontrada');
+    } catch (err) {
+      const msgErr = err instanceof ConflictError ? err.message : 'No se pudo eliminar la categoría';
+      await answerCallbackQuery(token, cb.id, msgErr.slice(0, 180));
+    }
+    return;
+  }
+
+  if (action === 'deltag') {
+    const deleted = await deleteTag(env.DB, txId);
+    await editMessageText(
+      token,
+      msg.chat.id,
+      msg.message_id,
+      deleted ? '🗑️ <i>Etiqueta eliminada.</i>' : '⚠️ <i>La etiqueta ya no existe.</i>'
+    );
+    await answerCallbackQuery(token, cb.id, deleted ? 'Eliminada' : 'No encontrada');
+    return;
+  }
+
   if (action === 'resv') {
     const [tx, accounts, categories] = await Promise.all([
       getTransactionById(env.DB, txId),
@@ -586,13 +686,18 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
       await answerCallbackQuery(token, cb.id, 'Movimiento no encontrado');
       return;
     }
+    const savingsAcc = findSavingsAccount(accounts, tx.account_id, tx.currency);
+    if (!savingsAcc) {
+      await answerCallbackQuery(token, cb.id, 'No hay una cuenta de reservas/ahorro configurada');
+      return;
+    }
     const tz = env.TIMEZONE || 'America/Argentina/Buenos_Aires';
     await createTransaction(env.DB, {
       type: 'transfer',
       amount: tx.amount,
       currency: tx.currency,
-      account_id: 'mp',
-      to_account_id: 'mp_reservas',
+      account_id: tx.account_id,
+      to_account_id: savingsAcc.id,
       description: `Reserva (${tx.description})`,
       occurred_at: todayInTimezone(tz),
       source: 'telegram_button',
@@ -601,10 +706,15 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
       token,
       msg.chat.id,
       msg.message_id,
-      formatTransactionMessage(tx, accounts, categories, '🛡️ <i>Pasado a MP Reservas</i>'),
-      mainTxKeyboard(tx, { movedToReservas: true })
+      formatTransactionMessage(
+        tx,
+        accounts,
+        categories,
+        `🛡️ <i>Pasado a ${escapeHtml(savingsAcc.name)}</i>`
+      ),
+      mainTxKeyboard(tx, accounts, { movedToReservas: true })
     );
-    await answerCallbackQuery(token, cb.id, 'Pasado a Reservas');
+    await answerCallbackQuery(token, cb.id, `Pasado a ${savingsAcc.name}`);
     return;
   }
 
@@ -628,7 +738,7 @@ async function handleCallbackQuery(env: Env, cb: TelegramCallbackQuery): Promise
     msg.chat.id,
     msg.message_id,
     formatTransactionMessage(tx, accounts, categories),
-    mainTxKeyboard(tx)
+    mainTxKeyboard(tx, accounts)
   );
   await answerCallbackQuery(token, cb.id, action === 'back' ? undefined : 'Actualizado');
 }
@@ -714,13 +824,70 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
       today,
     });
 
+    if (parsed.intent === 'manage' && parsed.operations.length > 0) {
+      for (const op of parsed.operations) {
+        if (op.action === 'create_account') {
+          const created = await createAccount(env.DB, {
+            name: op.name,
+            type: op.account_type,
+            currency: op.currency,
+            initial_balance: op.initial_balance,
+            color: defaultColorForAccountType(op.account_type),
+            is_default: op.is_default ? 1 : 0,
+          });
+          const typeLabel =
+            created.type === 'credit_card'
+              ? 'Tarjeta de crédito'
+              : created.type === 'savings'
+                ? 'Reservas / Ahorro'
+                : created.type === 'cash'
+                  ? 'Efectivo'
+                  : 'Billetera / Banco';
+          await sendMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            [
+              '✅ <b>Cuenta creada</b>',
+              `• <b>Nombre:</b> ${escapeHtml(created.name)}${created.is_default ? ' ⭐ (Principal)' : ''}`,
+              `• <b>Tipo:</b> ${typeLabel} (${created.currency})`,
+              `• <b>Saldo inicial:</b> ${formatCurrency(created.initial_balance, created.currency)}`,
+            ].join('\n'),
+            [[{ text: '🗑️ Eliminar', callback_data: `delacc:${created.id}` }]]
+          );
+        } else if (op.action === 'create_category') {
+          const created = await createCategory(env.DB, {
+            name: op.name,
+            icon: op.icon,
+            type: op.category_type,
+            color: op.color,
+          });
+          await sendMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            `✅ <b>Categoría creada:</b> ${created.icon} ${escapeHtml(created.name)} (${created.type})`,
+            [[{ text: '🗑️ Eliminar', callback_data: `delcat:${created.id}` }]]
+          );
+        } else if (op.action === 'create_tag') {
+          const created = await createTag(env.DB, op.name, op.color);
+          await sendMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            `✅ <b>Etiqueta creada:</b> #${escapeHtml(created.name)}`,
+            [[{ text: '🗑️ Eliminar', callback_data: `deltag:${created.id}` }]]
+          );
+        }
+      }
+      return;
+    }
+
     if (parsed.intent === 'query') {
       const month = currentMonthInTimezone(tz);
       const nextMonth = addMonths(month, 1);
+      const defaultCurrency = env.DEFAULT_CURRENCY || 'ARS';
       const [summary, recent, projection] = await Promise.all([
         getMonthSummary(env.DB, month),
         listTransactions(env.DB, { month, limit: 30 }),
-        getFutureProjection(env.DB, nextMonth, 3),
+        getFutureProjection(env.DB, nextMonth, 3, defaultCurrency),
       ]);
       const answer = await answerFinancialQuery(env, {
         question: text || 'Resumen del mes',
@@ -733,13 +900,34 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
       return;
     }
 
+    if (accounts.length === 0) {
+      const keyboard: InlineButton[][] | undefined = env.DASHBOARD_URL
+        ? [[{ text: '⚙️ Configurar en Dashboard', web_app: { url: env.DASHBOARD_URL } }]]
+        : undefined;
+      await sendMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        [
+          '🏦 <b>Todavía no tenés cuentas creadas.</b>',
+          '',
+          'Creá tu primera cuenta escribiéndome algo como:',
+          '• <i>"Creá mi cuenta principal Billetera en ARS"</i>',
+          '• <i>"Agregá tarjeta de crédito Visa en ARS"</i>',
+          '',
+          'O configuralas desde el Dashboard.',
+        ].join('\n'),
+        keyboard
+      );
+      return;
+    }
+
     if (parsed.intent !== 'record' || parsed.transactions.length === 0) {
       await sendMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
         escapeHtml(
           parsed.reply_text ||
-            'No pude identificar un gasto, ingreso o transferencia. Probá con algo como: "Café 3500" o "Supermercado 40k con BBVA".'
+            'No pude identificar un movimiento ni una acción. Probá con: "Café 3500", "Creá cuenta Galicia en ARS" o usá /ayuda.'
         )
       );
       return;
@@ -775,7 +963,7 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
             env.TELEGRAM_BOT_TOKEN,
             chatId,
             formatTransactionMessage(created, accounts, categories, '🔗 <i>Compra compartida vinculada</i>'),
-            mainTxKeyboard(created)
+            mainTxKeyboard(created, accounts)
           );
         }
         continue;
@@ -799,16 +987,17 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate): Pr
         tags: draft.tags,
       });
 
+      const savingsAcc = findSavingsAccount(accounts, created.account_id, created.currency);
       const statusHint =
-        created.type === 'third_party_repayment' && created.account_id === 'mp'
-          ? '💡 <i>Si corresponde a cuotas futuras, podés pasarlo directo a Reservas:</i>'
+        created.type === 'third_party_repayment' && savingsAcc
+          ? `💡 <i>Si corresponde a cuotas futuras, podés pasarlo a ${escapeHtml(savingsAcc.name)}:</i>`
           : undefined;
 
       await sendMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
         formatTransactionMessage(created, accounts, categories, statusHint),
-        mainTxKeyboard(created)
+        mainTxKeyboard(created, accounts)
       );
     }
   } catch (err) {

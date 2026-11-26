@@ -222,21 +222,20 @@ describe('future projection (installments + recurring vs reservas)', () => {
   });
 });
 
-describe('gemini v2 intent sanitization', () => {
+describe('agnostic gemini intent sanitization', () => {
   const accounts = [
-    { id: 'mp', type: 'wallet' as const },
-    { id: 'mp_reservas', type: 'savings' as const },
-    { id: 'efectivo', type: 'cash' as const },
-    { id: 'bbva_credito', type: 'credit_card' as const },
-    { id: 'bbva_credito_usd', type: 'credit_card' as const },
-    { id: 'mp_credito', type: 'credit_card' as const },
+    { id: 'galicia', type: 'wallet' as const, currency: 'ARS', is_default: 1 },
+    { id: 'ahorro', type: 'savings' as const, currency: 'ARS', is_default: 0 },
+    { id: 'efectivo', type: 'cash' as const, currency: 'ARS', is_default: 0 },
+    { id: 'visa_ars', type: 'credit_card' as const, currency: 'ARS', is_default: 0 },
+    { id: 'visa_usd', type: 'credit_card' as const, currency: 'USD', is_default: 0 },
   ];
   const categories = [
-    { id: 'supermercado' },
-    { id: 'kiosco_cafe' },
-    { id: 'regalos' },
-    { id: 'otros' },
-    { id: 'otros_ingresos' },
+    { id: 'supermercado', type: 'expense' as const },
+    { id: 'kiosco_cafe', type: 'expense' as const },
+    { id: 'regalos', type: 'expense' as const },
+    { id: 'otros', type: 'expense' as const },
+    { id: 'otros_ingresos', type: 'income' as const },
   ];
 
   it('normalizes tags, investment category nulling, and next-month installment default on cards', () => {
@@ -248,7 +247,7 @@ describe('gemini v2 intent sanitization', () => {
             type: 'investment',
             amount: 150000,
             currency: 'ARS',
-            account_id: 'mp',
+            account_id: 'galicia',
             category_id: 'otros',
             description: 'Compra BTC',
             occurred_at: '2026-11-25',
@@ -258,13 +257,13 @@ describe('gemini v2 intent sanitization', () => {
             type: 'expense',
             amount: 44000,
             currency: 'ARS',
-            account_id: 'bbva_credito',
+            account_id: 'visa_ars',
             category_id: 'regalos',
-            description: 'Crocs papá',
+            description: 'Regalo',
             occurred_at: '2026-11-25',
             tags: ['#Familia', 'familia'],
             installments_total: 3,
-            third_party_name: 'Jere',
+            third_party_name: 'Alex',
             shared_third_party_amount: 22000,
           },
         ],
@@ -282,7 +281,7 @@ describe('gemini v2 intent sanitization', () => {
     expect(out.transactions[1].shared_third_party_amount).toBe(22000);
   });
 
-  it('routes USD BBVA card expenses to bbva_credito_usd and applies safe fallbacks', () => {
+  it('routes USD card expenses to a USD credit card and falls back to is_default liquid account', () => {
     const out = sanitizeParsedIntent(
       {
         intent: 'record',
@@ -291,13 +290,13 @@ describe('gemini v2 intent sanitization', () => {
             type: 'expense',
             amount: 5,
             currency: 'USD',
-            account_id: 'bbva_credito',
+            account_id: 'visa_ars',
             category_id: 'categoria_inexistente',
-            description: 'Wallet premium',
+            description: 'App premium',
             occurred_at: 'bad-date',
             tags: ['#Hormiga'],
             shared_third_party_amount: 10, // invalid >= amount
-            third_party_name: 'Jere',
+            third_party_name: 'Alex',
           },
           {
             type: 'expense',
@@ -309,18 +308,103 @@ describe('gemini v2 intent sanitization', () => {
             occurred_at: '2026-11-25',
             tags: [],
           },
+          {
+            type: 'transfer',
+            amount: 20000,
+            currency: 'ARS',
+            account_id: 'galicia',
+            to_account_id: 'galicia',
+            description: 'Ahorro mensual',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
         ],
       },
       { accounts, categories, today: '2026-11-25' }
     );
 
-    expect(out.transactions[0].account_id).toBe('bbva_credito_usd');
+    expect(out.transactions[0].account_id).toBe('visa_usd');
     expect(out.transactions[0].category_id).toBe('otros');
     expect(out.transactions[0].occurred_at).toBe('2026-11-25');
     expect(out.transactions[0].tags).toEqual(['hormiga']);
     expect(out.transactions[0].shared_third_party_amount).toBeNull();
 
-    expect(out.transactions[1].account_id).toBe('mp');
+    expect(out.transactions[1].account_id).toBe('galicia');
+    expect(out.transactions[2].to_account_id).toBe('ahorro');
+  });
+
+  it('returns empty transactions when accounts list is empty and sanitizes manage operations', () => {
+    const emptyOut = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'expense',
+            amount: 5000,
+            currency: 'ARS',
+            account_id: 'cualquiera',
+            description: 'Café',
+            occurred_at: '2026-11-25',
+            tags: [],
+          },
+        ],
+      },
+      { accounts: [], categories, today: '2026-11-25' }
+    );
+    expect(emptyOut.transactions).toEqual([]);
+
+    const manageOut = sanitizeParsedIntent(
+      {
+        intent: 'manage',
+        operations: [
+          {
+            action: 'create_account',
+            name: 'Visa Santander',
+            account_type: 'credit_card',
+            currency: 'usd',
+            initial_balance: 0,
+            is_default: true, // credit cards can never be default
+          },
+          {
+            action: 'create_category',
+            name: 'Gimnasio',
+            icon: '🏋️',
+            category_type: 'expense',
+            color: '#00E676',
+          },
+          {
+            action: 'create_tag',
+            name: '#Viaje',
+            color: 'invalid-color',
+          },
+        ],
+      },
+      { accounts: [], categories, today: '2026-11-25' }
+    );
+
+    expect(manageOut.intent).toBe('manage');
+    expect(manageOut.operations).toEqual([
+      {
+        action: 'create_account',
+        name: 'Visa Santander',
+        account_type: 'credit_card',
+        currency: 'USD',
+        initial_balance: 0,
+        is_default: false,
+      },
+      {
+        action: 'create_category',
+        name: 'Gimnasio',
+        icon: '🏋️',
+        category_type: 'expense',
+        color: '#00E676',
+      },
+      {
+        action: 'create_tag',
+        name: 'Viaje',
+        color: '#71717a',
+      },
+    ]);
   });
 });
 

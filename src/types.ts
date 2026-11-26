@@ -158,10 +158,33 @@ export interface ParsedTransactionDraft {
   shared_third_party_amount: number | null;
 }
 
+export type ManageOperation =
+  | {
+      action: 'create_account';
+      name: string;
+      account_type: AccountType;
+      currency: string;
+      initial_balance: number;
+      is_default: boolean;
+    }
+  | {
+      action: 'create_category';
+      name: string;
+      icon: string;
+      category_type: CategoryType;
+      color: string;
+    }
+  | {
+      action: 'create_tag';
+      name: string;
+      color: string;
+    };
+
 export interface ParsedIntent {
-  intent: 'record' | 'query' | 'unknown';
+  intent: 'record' | 'query' | 'manage' | 'unknown';
   reply_text?: string;
   transactions: ParsedTransactionDraft[];
+  operations: ManageOperation[];
 }
 
 export interface CategoryBreakdown {
