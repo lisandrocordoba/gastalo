@@ -15,6 +15,7 @@ interface Props {
     color: string;
     is_default: number;
     due_day: number | null;
+    closing_day: number | null;
   }) => Promise<void>;
   onUpdate: (
     id: string,
@@ -26,6 +27,7 @@ interface Props {
       color: string;
       is_default: number;
       due_day: number | null;
+      closing_day: number | null;
     }
   ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -89,6 +91,7 @@ export function AccountModal({
   const [colorTouched, setColorTouched] = useState(false);
   const [isDefault, setIsDefault] = useState(false);
   const [dueDay, setDueDay] = useState('');
+  const [closingDay, setClosingDay] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -105,6 +108,7 @@ export function AccountModal({
       setColorTouched(true);
       setIsDefault(editing.is_default === 1);
       setDueDay(editing.due_day ? String(editing.due_day) : '');
+      setClosingDay(editing.closing_day ? String(editing.closing_day) : '');
     } else {
       setName('');
       setType(defaultType);
@@ -114,6 +118,7 @@ export function AccountModal({
       setColorTouched(false);
       setIsDefault(false);
       setDueDay('');
+      setClosingDay('');
     }
   }, [open, editing, defaultType]);
 
@@ -152,6 +157,16 @@ export function AccountModal({
       parsedDueDay = dayNum;
     }
 
+    let parsedClosingDay: number | null = null;
+    if (type === 'credit_card' && closingDay.trim() !== '') {
+      const dayNum = Number(closingDay);
+      if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 31) {
+        setError('El día de cierre debe ser un entero entre 1 y 31.');
+        return;
+      }
+      parsedClosingDay = dayNum;
+    }
+
     setSaving(true);
     setError('');
     try {
@@ -163,6 +178,7 @@ export function AccountModal({
         color,
         is_default: type === 'credit_card' ? 0 : isDefault ? 1 : 0,
         due_day: type === 'credit_card' ? parsedDueDay : null,
+        closing_day: type === 'credit_card' ? parsedClosingDay : null,
       };
       if (editing) {
         await onUpdate(editing.id, payload);
@@ -279,21 +295,39 @@ export function AccountModal({
           </div>
 
           {type === 'credit_card' && (
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">
-                Día de vencimiento del resumen (1-31, opc.)
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="31"
-                value={dueDay}
-                onChange={(e) => setDueDay(e.target.value)}
-                placeholder="Ej: 10"
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
-              />
-              <p className="mt-1 text-[11px] text-zinc-500">
-                Si pasa este día con resumen pendiente, la tarjeta te avisa como vencida.
+            <div className="space-y-1">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-400">
+                    Día de cierre (1–31, opc.)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={closingDay}
+                    onChange={(e) => setClosingDay(e.target.value)}
+                    placeholder="Ej: 24"
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-400">
+                    Día de vencimiento (1–31, opc.)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={dueDay}
+                    onChange={(e) => setDueDay(e.target.value)}
+                    placeholder="Ej: 10"
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-500">
+                El cierre define en qué resumen entra cada compra; el vencimiento activa avisos de resumen impago.
               </p>
             </div>
           )}

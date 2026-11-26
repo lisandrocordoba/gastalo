@@ -28,6 +28,7 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
 | [`src/utils.ts`](src/utils.ts) | Helpers de zona horaria (`todayInTimezone`, `currentMonthInTimezone`), meses (`addMonths`, `monthDiff`, `previousMonths`), IDs y formato `ARS`/`USD`/`BRL` (`$`, `US$`, `R$`). |
 | [`migrations/0001_initial.sql`](migrations/0001_initial.sql) | Esquema limpio v3 ya aplicado en producción (`0` cuentas iniciales, `22` categorías base, `5` etiquetas base). |
 | [`migrations/0002_indexes.sql`](migrations/0002_indexes.sql) | Índices adicionales en `transactions(to_account_id)`, `recurring_items(account_id)` y `transactions(telegram_message_id)` para deduplicación de webhook. |
+| [`migrations/0003_cards_closing_and_fx.sql`](migrations/0003_cards_closing_and_fx.sql) | Agrega `accounts.closing_day` (cierre de tarjeta `1–31`) y `transactions.to_amount` (monto acreditado en transferencias/pagos multimoneda). |
 | [`web/src/App.tsx`](web/src/App.tsx) | Orquestador de estado del Dashboard, filtros (con atribución vía `paid_statement_items` y `referencedTransactions`) y montaje único de modales. |
 | [`web/src/api.ts`](web/src/api.ts) | Cliente HTTP hacia `/api/*` y formateo monetario (`formatMoney`). |
 | [`web/src/components/`](web/src/components/) | `SummaryCards`, `CurrentStatusBar`, `AccountsGrid`, `CreditCardsSection`, `CategoryChart`, `MonthlyChart`, `TagsPanel`, `FutureProjectionCard`, `TransactionList`, `AccountModal`, `RecurringModal`, `TransactionModal`, `SettingsModal`, `DateRangePicker`. |
@@ -45,16 +46,18 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
    - Resolver cuentas por capacidades (`is_default = 1`, `type IN ('wallet','savings','cash','credit_card')`, `currency` en `ARS`, `USD` o `BRL`).
    - `wrangler.toml` se mantiene fuera de Git (listado en `.gitignore`); solo se versiona `wrangler.example.toml`.
 
-2. **Contabilidad de tarjetas (`expense` vs. `transfer` con `statement_month`):**
+2. **Contabilidad de tarjetas (`expense` vs. `transfer` con `statement_month` y pagos multimoneda):**
    - Los `expense` y `third_party` en una `credit_card` descuentan el saldo de la tarjeta al instante (deuda negativa), pero **no** suman en consumo `cash` del período al pasar la tarjeta.
    - El gasto entra en consumo real recién cuando se paga el resumen mediante `transfer` con `to_account_id = card.id` y `statement_month` (`YYYY-MM`), con asignación cronológica acumulada para pagos parciales/múltiples (`status: 'pending' | 'partial' | 'paid'`), prorrateando solo la porción propia (`own_total`) por categoría y etiqueta, y exponiendo `paid_statement_items` + `referencedTransactions` en `/api/bootstrap`.
+   - **Transferencias y pagos entre monedas distintas (`to_amount` / `source_amount`):** cuando `transfer` conecta cuentas de distinta moneda (`account.currency !== to_account.currency`), `amount` se debita en la moneda origen y `to_amount` se acredita en la moneda destino. Al pagar un resumen de tarjeta en moneda extranjera desde otra moneda (`POST /api/cards/:id/pay-statement` con `source_amount`), el egreso real en flujo `cash` se imputa en la moneda origen (`source_amount`, equivalente a `to_amount` en la tarjeta) sin doble contabilización.
    - `third_party` y `third_party_repayment` nunca suman al consumo personal ni a ingresos.
 
-3. **Semántica de fechas y vencimientos:**
+3. **Semántica de fechas, cierres y vencimientos:**
    - `occurred_at` (`YYYY-MM-DD`): fecha real bancaria; **siempre** manda en saldos actuales.
    - `budget_month` (`YYYY-MM`, opcional): permite imputar ingresos de fin de mes al mes siguiente en KPIs, gráficos y listados (`effectiveTransactionDate`), sin alterar saldos.
    - `recurring_items.start_month` (`YYYY-MM`, opcional): en tarjetas marca el *primer resumen*; en proyección futura filtra meses `>= start_month`. `day_of_month` es opcional y solo referencia para fechar el cargo dentro de `statement_month`.
-   - `accounts.due_day` (`1–31`, opcional, solo `credit_card`): `computeCardStatements` calcula `due_date` haciendo clamp al último día del mes y marca `is_overdue: true` solo si `!paid && total_due > 0 && today > due_date`. `computeOverdueCardAlerts` revisa todos los meses candidatos `<= hoy` para mantener el banner superior fijo sin importar el período seleccionado.
+   - `accounts.closing_day` (`1–31`, opcional, solo `credit_card`): define el resumen por defecto de nuevas compras con tarjeta (`day <= clamp(closing_day)` → `mes + 1`; `day > clamp(closing_day)` → `mes + 2`, haciendo clamp a la longitud real del mes). Si es `null`, cae a `mes + 1`.
+   - `accounts.due_day` (`1–31`, opcional, solo `credit_card`): `computeCardStatements` calcula `due_date` haciendo clamp al último día del mes y marca `is_overdue: true` solo si `!paid && total_due > 0 && today > due_date`. `computeOverdueCardAlerts` revisa todos los meses candidatos `<= hoy` e incluye `remaining_due` y `status` (`'pending' | 'partial'`) para mantener el banner superior fijo con el saldo impago real.
 
 4. **Fuente única de verdad en UI:**
    - Los modales principales (`AccountModal.tsx`, `RecurringModal.tsx`, `TransactionModal.tsx`) se montan **una sola vez** en `web/src/App.tsx`.
@@ -62,8 +65,8 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
    - Si se cambia la cuenta de una transacción o gasto fijo (`PATCH /api/recurring/:id` o callback de Telegram), mantener sincronizada `currency`.
 
 5. **Migraciones D1 inmutables:**
-   - `migrations/0001_initial.sql` y `migrations/0002_indexes.sql` son inmutables una vez aplicadas en producción.
-   - Todo cambio futuro de esquema **debe** crearse como un nuevo archivo numerado (`migrations/0003_...sql`, etc.) y probarse primero en `--local`.
+   - `migrations/0001_initial.sql`, `migrations/0002_indexes.sql` y las migraciones ya aplicadas en producción son inmutables.
+   - Todo cambio futuro de esquema **debe** crearse como un nuevo archivo numerado (`migrations/0004_...sql`, etc.) y probarse primero en `--local`.
 
 6. **SDK de Gemini:**
    - Usar únicamente `@google/genai` con `ai.interactions.create` (`GEMINI_MODEL = 'gemini-3.5-flash-lite'`), nunca APIs legacy.

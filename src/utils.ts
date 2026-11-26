@@ -141,6 +141,24 @@ export function previousMonths(endMonth: string, count: number): string[] {
   return result;
 }
 
+export function defaultCardStatementMonth(
+  occurredAt: string,
+  closingDay?: number | null
+): string {
+  const ym = occurredAt.slice(0, 7);
+  if (!closingDay || !Number.isInteger(closingDay) || closingDay < 1 || closingDay > 31) {
+    return addMonths(ym, 1);
+  }
+  const [y, m] = ym.split('-').map(Number);
+  const day = Number(occurredAt.slice(8, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(day)) {
+    return addMonths(ym, 1);
+  }
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const effectiveClosingDay = Math.min(closingDay, lastDay);
+  return day <= effectiveClosingDay ? addMonths(ym, 1) : addMonths(ym, 2);
+}
+
 export function slugifyTag(name: string, maxLen = 32): string {
   return name
     .trim()

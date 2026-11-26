@@ -294,6 +294,13 @@ app.post('/api/transactions', async (c) => {
   if (body.type === 'transfer' && (!body.to_account_id || body.to_account_id === body.account_id)) {
     return c.json({ error: 'Cuenta destino inválida para transferencia' }, 400);
   }
+  if (
+    body.to_amount !== undefined &&
+    body.to_amount !== null &&
+    (typeof body.to_amount !== 'number' || !Number.isFinite(body.to_amount) || body.to_amount <= 0)
+  ) {
+    return c.json({ error: 'to_amount inválido' }, 400);
+  }
   if (body.occurred_at !== undefined && (typeof body.occurred_at !== 'string' || !isValidIsoDate(body.occurred_at))) {
     return c.json({ error: 'Fecha inválida (formato esperado YYYY-MM-DD)' }, 400);
   }
@@ -325,6 +332,7 @@ app.post('/api/transactions', async (c) => {
     currency: body.currency && body.currency.trim() ? body.currency : undefined,
     account_id: body.account_id.trim(),
     to_account_id: body.to_account_id ?? null,
+    to_amount: body.to_amount ?? null,
     category_id: body.category_id ?? null,
     description: body.description.trim(),
     occurred_at: body.occurred_at || todayInTimezone(tz),
@@ -405,6 +413,13 @@ app.post('/api/transactions/shared', async (c) => {
 app.patch('/api/transactions/:id', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json<Partial<TransactionInput>>();
+  if (
+    body.to_amount !== undefined &&
+    body.to_amount !== null &&
+    (typeof body.to_amount !== 'number' || !Number.isFinite(body.to_amount) || body.to_amount <= 0)
+  ) {
+    return c.json({ error: 'to_amount inválido' }, 400);
+  }
   const updated = await updateTransaction(c.env.DB, id, body);
   if (!updated) {
     return c.json({ error: 'Movimiento no encontrado' }, 404);
@@ -444,6 +459,20 @@ app.post('/api/accounts', async (c) => {
   ) {
     return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
   }
+  if (
+    body.closing_day !== undefined &&
+    body.closing_day !== null &&
+    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
+  ) {
+    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
+  }
+  if (
+    body.closing_day !== undefined &&
+    body.closing_day !== null &&
+    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
+  ) {
+    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
+  }
   const currency =
     body.currency !== undefined && body.currency !== null && body.currency.trim() !== ''
       ? normalizeCurrency(body.currency)
@@ -461,6 +490,7 @@ app.post('/api/accounts', async (c) => {
     color: body.color,
     is_default: body.is_default,
     due_day: body.due_day ?? null,
+    closing_day: body.closing_day ?? null,
   });
   const accounts = await listAccountsWithBalances(c.env.DB);
   return c.json({ account, accounts }, 201);
@@ -487,6 +517,13 @@ app.patch('/api/accounts/:id', async (c) => {
     (!Number.isInteger(body.due_day) || body.due_day < 1 || body.due_day > 31)
   ) {
     return c.json({ error: 'due_day debe ser un entero entre 1 y 31' }, 400);
+  }
+  if (
+    body.closing_day !== undefined &&
+    body.closing_day !== null &&
+    (!Number.isInteger(body.closing_day) || body.closing_day < 1 || body.closing_day > 31)
+  ) {
+    return c.json({ error: 'closing_day debe ser un entero entre 1 y 31' }, 400);
   }
 
   const updated = await updateAccount(c.env.DB, id, body);
@@ -544,6 +581,15 @@ app.post('/api/cards/:id/pay-statement', async (c) => {
       return c.json({ error: 'fees_amount inválido' }, 400);
     }
   }
+  if (body.source_amount !== undefined && body.source_amount !== null) {
+    if (
+      typeof body.source_amount !== 'number' ||
+      !Number.isFinite(body.source_amount) ||
+      body.source_amount <= 0
+    ) {
+      return c.json({ error: 'source_amount inválido' }, 400);
+    }
+  }
   if (body.occurred_at !== undefined && (typeof body.occurred_at !== 'string' || !isValidIsoDate(body.occurred_at))) {
     return c.json({ error: 'Fecha inválida (formato esperado YYYY-MM-DD)' }, 400);
   }
@@ -558,6 +604,7 @@ app.post('/api/cards/:id/pay-statement', async (c) => {
     statement_month: body.statement_month.trim(),
     from_account_id: body.from_account_id || '',
     amount: body.amount,
+    source_amount: typeof body.source_amount === 'number' ? body.source_amount : undefined,
     fees_amount: fees,
     occurred_at: body.occurred_at || todayInTimezone(tz),
     description: body.description,

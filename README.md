@@ -3,9 +3,10 @@
 Asistente de finanzas personales 100% gratuito (\$0/mes) y **agnóstico**: al levantarlo arranca limpio (sin cuentas predefinidas) para que configures tus propios bancos, billeteras, efectivo, cuentas de ahorro/reservas y tarjetas de crédito (**ARS, USD y BRL**) desde el **Dashboard Web** o conversacionalmente por **Telegram**.
 
 ### Características principales
-- **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito (con día de vencimiento `due_day`), categorías y etiquetas.
+- **Configuración flexible (Web + Bot):** alta, edición, color, cuenta principal por defecto y eliminación protegida de cuentas, tarjetas de crédito (con día de cierre `closing_day` y día de vencimiento `due_day`), categorías y etiquetas.
 - **Bot de Telegram con IA multimodal (`gemini-3.5-flash-lite`):** entiende texto libre, notas de voz y fotos de tickets/comprobantes para registrar movimientos (`expense`, `income`, `transfer`, `investment`, `third_party`, `third_party_repayment`, `adjustment`), pagar resúmenes de TC (`statement_month`), imputar ingresos al mes siguiente (`budget_month`), responder consultas (con resúmenes y vencimientos) o crear cuentas/categorías/etiquetas por chat (`/cuentas`, `/config`, `/resumen`, `/mes`, `/ayuda`).
-- **Tarjetas de crédito con flujo real (Opción B), pagos parciales y alertas de vencimiento:** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; al registrar el pago del resumen (`💳 Pagar resumen` o por Telegram, soportando pagos parciales o múltiples con estado `pending` / `partial` / `paid`), se descuentan deuda y saldo líquido e ingresan al consumo desglosados por categoría. Si configurás el día de vencimiento en la TC, un banner fijo superior avisa cuando hay resúmenes vencidos sin pagar.
+- **Tarjetas de crédito con flujo real (Opción B), cierre, pagos parciales y multimoneda:** las compras con tarjeta suman deuda real al instante sin distorsionar los gastos mensuales de efectivo/billetera; el `closing_day` asigna automáticamente el resumen correspondiente (`<= cierre` → mes + 1; `> cierre` → mes + 2, ajustado al fin de mes). Al pagar el resumen (`💳 Pagar resumen` o por Telegram, soportando pagos parciales/múltiples `pending` / `partial` / `paid` e incluso liquidación desde otra moneda con `source_amount`), se descuentan deuda y saldo líquido e ingresan al consumo sin doble contabilización. Si configurás `due_day`, un banner fijo superior avisa cuando hay resúmenes vencidos mostrando el saldo restante (`remaining_due`).
+- **Transferencias entre monedas (`to_amount`):** transferí libremente entre cuentas en `ARS`, `USD` y `BRL` registrando el monto exacto acreditado en la cuenta destino y visualizando el tipo de cambio implícito.
 - **Cuotas, suscripciones, compartidos y proyección futura:** control de compras en cuotas (`>= 2`), suscripciones asociadas a tarjetas o cuentas líquidas con mes de inicio (`start_month`) desde un único modal (`⚙️ Configurar` → *Fijos / Suscr.* o sección Tarjetas/Proyección), proyección ARS + USD a 3 meses vs. tus cuentas de reservas, división de gastos con terceros, filtro interactivo con atribución de ítems pagados en resumen (`paid_statement_items`) y mes contable opcional (`budget_month`).
 - **Dashboard Web (PWA + Telegram Mini App):** carga consistente en snapshot único (`/api/bootstrap`), gráficos interactivos, conciliación rápida de saldo (`⚖️`), ordenamiento por fecha/monto y exportación a CSV.
 
@@ -48,7 +49,7 @@ cp wrangler.example.toml wrangler.toml
 cp .dev.vars.example .dev.vars
 # Completar .dev.vars con tus claves obligatorias (TELEGRAM_WEBHOOK_SECRET, ALLOWED_TELEGRAM_USER_ID, DASHBOARD_TOKEN, etc.)
 
-# Crear la base de datos local y aplicar las migraciones (0001_initial.sql + 0002_indexes.sql)
+# Crear la base de datos local y aplicar las migraciones (0001_initial.sql + 0002_indexes.sql + 0003_cards_closing_and_fx.sql)
 npm run db:migrate:local
 
 # Ejecutar tests y verificar build
