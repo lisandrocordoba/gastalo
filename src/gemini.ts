@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import { pickDefaultLiquidAccount } from './db';
 import {
   SUPPORTED_CURRENCIES,
@@ -469,6 +468,11 @@ export function sanitizeParsedIntent(
   };
 }
 
+async function createGenAIClient(apiKey: string) {
+  const { GoogleGenAI } = await import('@google/genai');
+  return new GoogleGenAI({ apiKey });
+}
+
 interface ParseInput {
   text?: string;
   media?: { base64: string; mimeType: string; kind: 'audio' | 'image' };
@@ -479,7 +483,7 @@ interface ParseInput {
 }
 
 export async function parseMessageWithGemini(env: Env, params: ParseInput): Promise<ParsedIntent> {
-  const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  const ai = await createGenAIClient(env.GEMINI_API_KEY);
   const defaultCurrency = env.DEFAULT_CURRENCY || 'ARS';
 
   const accountList =
@@ -634,7 +638,7 @@ export async function answerFinancialQuery(
     defaultCurrency?: string;
   }
 ): Promise<string> {
-  const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  const ai = await createGenAIClient(env.GEMINI_API_KEY);
   const baseCurrency = normalizeCurrency(params.defaultCurrency, 'ARS') ?? 'ARS';
   const accountNameMap = new Map(params.accounts.map((a) => [a.id, a.name]));
 
