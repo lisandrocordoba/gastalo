@@ -26,7 +26,7 @@ export function CurrentStatusBar({ accounts, thirdPartyPending }: Props) {
     {
       label: 'Liquidez disponible ARS',
       value: formatMoney(liquidArs),
-      subtitle: 'MP + MP Reservas + Efectivo',
+      subtitle: 'Cuentas líquidas + Reservas',
       icon: Landmark,
       color: liquidArs >= 0 ? 'text-[#38BDF8]' : 'text-rose-400',
       bg: 'bg-[#009EE3]/10 border-[#009EE3]/30',

@@ -36,7 +36,7 @@ export function TagsPanel({
 
         {byTag.length === 0 ? (
           <p className="mt-4 text-xs text-zinc-500">
-            Sin gastos etiquetados este mes (ej. #casa, #hormiga, #abril).
+            Sin gastos etiquetados este mes (ej. #casa, #hormiga, #vacaciones).
           </p>
         ) : (
           <div className="mt-3 space-y-2.5">

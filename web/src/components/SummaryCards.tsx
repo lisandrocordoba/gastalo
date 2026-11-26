@@ -57,7 +57,7 @@ export function SummaryCards({
           <p className="mt-0.5 text-[11px] text-zinc-400 tabular-nums">
             {summary.usd_expense > 0
               ? `+ ${formatMoney(summary.usd_expense, 'USD')}`
-              : 'Efectivo, MP y pagos TC'}
+              : 'Cuentas líquidas y pagos TC'}
           </p>
         </div>
 

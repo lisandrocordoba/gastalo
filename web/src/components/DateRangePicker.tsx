@@ -88,7 +88,7 @@ export function getAllTimeRange(): DateRangeValue {
   const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
   return {
     mode: 'years',
-    from: '2022-01-01',
+    from: '2000-01-01',
     to: today,
     label: 'Todo el histórico',
   };
@@ -287,7 +287,7 @@ export function DateRangePicker({ value, onChange }: Props) {
           {tab === 'years' && (
             <div className="mt-3 space-y-2">
               <div className="grid grid-cols-3 gap-1.5">
-                {[2022, 2023, 2024, 2025, 2026].map((y) => {
+                {Array.from({ length: 5 }, (_, idx) => now.getFullYear() - 4 + idx).map((y) => {
                   const active = value.mode === 'years' && value.label === `Año ${y}`;
                   return (
                     <button
@@ -320,7 +320,7 @@ export function DateRangePicker({ value, onChange }: Props) {
                     : 'border-zinc-800 bg-zinc-950 text-zinc-200 hover:bg-zinc-800'
                 }`}
               >
-                Todo el histórico (2022 → hoy)
+                Todo el histórico
               </button>
             </div>
           )}

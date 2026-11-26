@@ -55,15 +55,22 @@ function typeBadge(tx: Transaction, catIcon?: string): { icon: string; color: st
   }
 }
 
-function accountPillStyle(acc?: AccountWithBalance): string {
-  if (!acc) return 'border-zinc-700 bg-zinc-900 text-zinc-300';
-  if (acc.type === 'cash') {
-    return 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300';
-  }
+function accountPillProps(acc?: AccountWithBalance): {
+  className: string;
+  style?: React.CSSProperties;
+} {
+  if (!acc) return { className: 'border-zinc-700 bg-zinc-900 text-zinc-300' };
   if (acc.type === 'credit_card') {
-    return 'border-zinc-700 bg-black text-zinc-200';
+    return { className: 'border-zinc-700 bg-black text-zinc-200' };
   }
-  return 'border-[#009EE3]/45 bg-[#009EE3]/15 text-[#38BDF8]';
+  const color = acc.color || '#009EE3';
+  return {
+    className: 'text-zinc-100',
+    style: {
+      borderColor: `${color}66`,
+      backgroundColor: `${color}22`,
+    },
+  };
 }
 
 export function TransactionList({
@@ -338,7 +345,8 @@ export function TransactionList({
                         onClick={() =>
                           onSelectAccount(selectedAccount === tx.account_id ? '' : tx.account_id)
                         }
-                        className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition hover:border-emerald-500/60 ${accountPillStyle(acc)}`}
+                        style={accountPillProps(acc).style}
+                        className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition hover:border-emerald-500/60 ${accountPillProps(acc).className}`}
                       >
                         {acc?.name ?? tx.account_id}
                       </button>
@@ -350,7 +358,8 @@ export function TransactionList({
                             onClick={() =>
                               onSelectAccount(selectedAccount === toAcc.id ? '' : toAcc.id)
                             }
-                            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition hover:border-emerald-500/60 ${accountPillStyle(toAcc)}`}
+                            style={accountPillProps(toAcc).style}
+                            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition hover:border-emerald-500/60 ${accountPillProps(toAcc).className}`}
                           >
                             {toAcc.name}
                           </button>

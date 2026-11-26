@@ -7,6 +7,8 @@ import {
   ChevronUp,
   Clock,
   CreditCard,
+  Pencil,
+  Plus,
   X,
 } from 'lucide-react';
 import { formatMoney } from '../api';
@@ -21,6 +23,8 @@ interface Props {
   defaultPayDate: string;
   selectedAccount: string;
   onSelectAccount: (accountId: string) => void;
+  onCreateCard: () => void;
+  onEditCard: (acc: AccountWithBalance) => void;
   onPayStatement: (
     cardId: string,
     payload: {
@@ -49,24 +53,32 @@ export function CreditCardsSection({
   defaultPayDate,
   selectedAccount,
   onSelectAccount,
+  onCreateCard,
+  onEditCard,
   onPayStatement,
 }: Props) {
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [payingStatement, setPayingStatement] = useState<CardStatement | null>(null);
-  const [fromAccountId, setFromAccountId] = useState('mp');
+  const [fromAccountId, setFromAccountId] = useState('');
   const [payAmount, setPayAmount] = useState('');
   const [feesAmount, setFeesAmount] = useState('0');
   const [payDate, setPayDate] = useState(defaultPayDate);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  const accMap = new Map(accounts.map((a) => [a.id, a]));
   const catMap = new Map(categories.map((c) => [c.id, c]));
-  const liquidAccounts = accounts.filter((a) => a.type !== 'credit_card' && a.currency === 'ARS');
+  const liquidAccounts = accounts.filter((a) => a.type !== 'credit_card');
   const hasSelectedCard = statements.some((s) => s.account_id === selectedAccount);
 
   const openPayModal = (st: CardStatement) => {
+    const preferredFrom =
+      liquidAccounts.find((a) => a.currency === st.currency && a.is_default === 1) ??
+      liquidAccounts.find((a) => a.currency === st.currency) ??
+      liquidAccounts.find((a) => a.is_default === 1) ??
+      liquidAccounts[0];
     setPayingStatement(st);
-    setFromAccountId('mp');
+    setFromAccountId(preferredFrom?.id ?? '');
     setPayAmount(String(st.total_due > 0 ? st.total_due : Math.abs(st.card_debt)));
     setFeesAmount('0');
     setPayDate(defaultPayDate);
@@ -124,33 +136,59 @@ export function CreditCardsSection({
           </p>
         </div>
 
-        <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-1.5 py-1">
-          <span className="px-1.5 text-[11px] text-zinc-400">Resumen:</span>
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => onChangeStatementMonth(shiftYm(statementMonth, -1))}
-            className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+            onClick={onCreateCard}
+            className="inline-flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-emerald-500/50 hover:bg-zinc-800"
           >
-            <ChevronLeft className="h-3.5 w-3.5" />
+            <Plus className="h-3.5 w-3.5 text-emerald-400" />
+            Nueva tarjeta
           </button>
-          <span className="px-2 text-xs font-semibold text-zinc-100 tabular-nums">
-            {statementMonth}
-          </span>
-          <button
-            type="button"
-            onClick={() => onChangeStatementMonth(shiftYm(statementMonth, 1))}
-            className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-1.5 py-1">
+            <span className="px-1.5 text-[11px] text-zinc-400">Resumen:</span>
+            <button
+              type="button"
+              onClick={() => onChangeStatementMonth(shiftYm(statementMonth, -1))}
+              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <span className="px-2 text-xs font-semibold text-zinc-100 tabular-nums">
+              {statementMonth}
+            </span>
+            <button
+              type="button"
+              onClick={() => onChangeStatementMonth(shiftYm(statementMonth, 1))}
+              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
+      {statements.length === 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/40 p-4">
+          <p className="text-xs text-zinc-400">
+            No tenés tarjetas de crédito configuradas.
+          </p>
+          <button
+            type="button"
+            onClick={onCreateCard}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:bg-zinc-800"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Nueva tarjeta
+          </button>
+        </div>
+      ) : (
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
         {statements.map((st) => {
           const isExpanded = expandedCardId === st.account_id;
           const isPaid = st.status === 'paid';
           const isSelected = selectedAccount === st.account_id;
+          const cardAccount = accMap.get(st.account_id);
 
           return (
             <div
@@ -180,23 +218,38 @@ export function CreditCardsSection({
                       <p className="text-[11px] uppercase text-zinc-500">{st.currency}</p>
                     </div>
                   </div>
-                  <span
-                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
-                      isPaid
-                        ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300'
-                        : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
-                    }`}
-                  >
-                    {isPaid ? (
-                      <>
-                        <CheckCircle2 className="h-3 w-3" /> Pagado
-                      </>
-                    ) : (
-                      <>
-                        <Clock className="h-3 w-3" /> Pendiente
-                      </>
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+                        isPaid
+                          ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300'
+                          : 'border-amber-500/35 bg-amber-500/15 text-amber-300'
+                      }`}
+                    >
+                      {isPaid ? (
+                        <>
+                          <CheckCircle2 className="h-3 w-3" /> Pagado
+                        </>
+                      ) : (
+                        <>
+                          <Clock className="h-3 w-3" /> Pendiente
+                        </>
+                      )}
+                    </span>
+                    {cardAccount && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onEditCard(cardAccount);
+                        }}
+                        title="Editar tarjeta"
+                        className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
                     )}
-                  </span>
+                  </div>
                 </div>
 
                 <div className="mt-3 flex items-baseline justify-between gap-2">
@@ -300,6 +353,7 @@ export function CreditCardsSection({
           );
         })}
       </div>
+      )}
 
       {payingStatement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
@@ -320,17 +374,23 @@ export function CreditCardsSection({
             <form onSubmit={handlePaySubmit} className="mt-4 space-y-3">
               <div>
                 <label className="mb-1 block text-xs text-zinc-400">Cuenta que paga</label>
-                <select
-                  value={fromAccountId}
-                  onChange={(e) => setFromAccountId(e.target.value)}
-                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
-                >
-                  {liquidAccounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({formatMoney(a.balance, a.currency)})
-                    </option>
-                  ))}
-                </select>
+                {liquidAccounts.length === 0 ? (
+                  <p className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    Creá al menos una cuenta líquida (billetera, banco o efectivo) para poder registrar el pago.
+                  </p>
+                ) : (
+                  <select
+                    value={fromAccountId}
+                    onChange={(e) => setFromAccountId(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                  >
+                    {liquidAccounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} ({a.currency} · {formatMoney(a.balance, a.currency)})
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -391,7 +451,7 @@ export function CreditCardsSection({
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || liquidAccounts.length === 0}
                   className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                 >
                   {saving ? 'Registrando...' : 'Confirmar pago'}

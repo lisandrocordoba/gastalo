@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CalendarClock, Pause, Play, Plus, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { formatMoney } from '../api';
 import type { AccountWithBalance, Category, FutureProjection, RecurringItem } from '../types';
@@ -28,17 +28,41 @@ export function FutureProjectionCard({
   onToggleRecurring,
   onDeleteRecurring,
 }: Props) {
+  const expenseCategories = categories.filter((c) => c.type === 'expense' || c.type === 'both');
+  const eligibleAccounts = accounts.filter((a) => a.currency === 'ARS');
+  const defaultAccountId =
+    eligibleAccounts.find((a) => a.is_default === 1 && a.type !== 'credit_card')?.id ??
+    eligibleAccounts[0]?.id ??
+    accounts[0]?.id ??
+    '';
+  const defaultCategoryId =
+    expenseCategories.find((c) => c.id === 'suscripciones')?.id ??
+    expenseCategories[0]?.id ??
+    '';
+
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
-  const [accountId, setAccountId] = useState('mp');
-  const [categoryId, setCategoryId] = useState('suscripciones');
+  const [accountId, setAccountId] = useState(defaultAccountId);
+  const [categoryId, setCategoryId] = useState(defaultCategoryId);
   const [dayOfMonth, setDayOfMonth] = useState('5');
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    if (!accountId && defaultAccountId) setAccountId(defaultAccountId);
+  }, [accountId, defaultAccountId]);
+
+  useEffect(() => {
+    if (!categoryId && defaultCategoryId) setCategoryId(defaultCategoryId);
+  }, [categoryId, defaultCategoryId]);
+
   const firstMonth = projection.months[0];
   const covered = projection.next_month_coverage_delta >= 0;
-  const expenseCategories = categories.filter((c) => c.type === 'expense' || c.type === 'both');
+  const savingsAccounts = accounts.filter((a) => a.type === 'savings');
+  const projectionTitle =
+    savingsAccounts.length === 1
+      ? `Próximos meses vs. ${savingsAccounts[0].name}`
+      : 'Próximos meses vs. Reservas / Ahorros';
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -67,9 +91,7 @@ export function FutureProjectionCard({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <CalendarClock className="h-4 w-4 text-violet-400" />
-          <h3 className="text-sm font-semibold text-zinc-200">
-            Próximos meses vs. MP Reservas
-          </h3>
+          <h3 className="text-sm font-semibold text-zinc-200">{projectionTitle}</h3>
         </div>
         <span
           className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${
@@ -138,8 +160,9 @@ export function FutureProjectionCard({
           </span>
           <button
             type="button"
+            disabled={accounts.length === 0}
             onClick={() => setShowForm((v) => !v)}
-            className="inline-flex items-center gap-1 rounded-lg bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+            className="inline-flex items-center gap-1 rounded-lg bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Plus className="h-3.5 w-3.5" />
             Agregar fijo
@@ -156,7 +179,7 @@ export function FutureProjectionCard({
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Ej: Tuenti / Gym"
+              placeholder="Ej: Internet / Gimnasio"
               className="col-span-2 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 outline-none focus:border-emerald-500 sm:col-span-1"
             />
             <input

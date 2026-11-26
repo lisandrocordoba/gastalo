@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Download, KeyRound, Plus, RefreshCw } from 'lucide-react';
+import { CreditCard, Download, KeyRound, Plus, RefreshCw, Settings, Sparkles } from 'lucide-react';
 import {
+  createAccount,
+  createCategory,
   createRecurringItem,
   createSharedPurchase,
   createTag,
   createTransaction,
+  deleteAccount,
+  deleteCategory,
   deleteRecurringItem,
+  deleteTag,
   deleteTransaction,
   downloadCsv,
   fetchBootstrap,
@@ -14,10 +19,13 @@ import {
   reconcileAccount,
   setStoredToken,
   UnauthorizedError,
-  updateAccountInitialBalance,
+  updateAccount,
+  updateCategory,
   updateRecurringItem,
+  updateTag,
   updateTransaction,
 } from './api';
+import { AccountModal } from './components/AccountModal';
 import { AccountsGrid } from './components/AccountsGrid';
 import { CategoryChart } from './components/CategoryChart';
 import { CreditCardsSection } from './components/CreditCardsSection';
@@ -25,11 +33,12 @@ import { CurrentStatusBar } from './components/CurrentStatusBar';
 import { DateRangePicker, getMonthRange, type DateRangeValue } from './components/DateRangePicker';
 import { FutureProjectionCard } from './components/FutureProjectionCard';
 import { MonthlyChart } from './components/MonthlyChart';
+import { SettingsModal } from './components/SettingsModal';
 import { SummaryCards } from './components/SummaryCards';
 import { TagsPanel } from './components/TagsPanel';
 import { TransactionList } from './components/TransactionList';
 import { TransactionModal } from './components/TransactionModal';
-import type { BootstrapResponse, Transaction } from './types';
+import type { AccountType, AccountWithBalance, BootstrapResponse, Transaction } from './types';
 
 function currentMonthStr(): string {
   const now = new Date();
@@ -59,10 +68,26 @@ export function App() {
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [accountModalOpen, setAccountModalOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<AccountWithBalance | null>(null);
+  const [defaultAccountType, setDefaultAccountType] = useState<AccountType>('wallet');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
   const [cardPurchasesOnly, setCardPurchasesOnly] = useState(false);
+
+  const openCreateAccountModal = (accountType: AccountType) => {
+    setEditingAccount(null);
+    setDefaultAccountType(accountType);
+    setAccountModalOpen(true);
+  };
+
+  const openEditAccountModal = (acc: AccountWithBalance) => {
+    setEditingAccount(acc);
+    setDefaultAccountType(acc.type);
+    setAccountModalOpen(true);
+  };
 
   const loadData = useCallback(
     async (range: DateRangeValue, activeStatementMonth: string) => {
@@ -159,7 +184,7 @@ export function App() {
           <div>
             <h1 className="text-lg font-bold tracking-tight text-white">Gasti Personal</h1>
             <p className="text-xs text-zinc-400">
-              Mercado Pago · Reservas · Efectivo · Tarjetas de Crédito
+              Finanzas personales · Cuentas, Tarjetas y Presupuesto
             </p>
           </div>
 
@@ -185,6 +210,16 @@ export function App() {
 
             <button
               type="button"
+              onClick={() => setSettingsOpen(true)}
+              title="Configurar cuentas, tarjetas, categorías y etiquetas"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Configurar</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => void downloadCsv(dateRange.from, dateRange.to)}
               title="Exportar CSV"
               className="hidden items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:inline-flex"
@@ -195,11 +230,17 @@ export function App() {
 
             <button
               type="button"
+              disabled={!data || data.accounts.length === 0}
+              title={
+                !data || data.accounts.length === 0
+                  ? 'Creá al menos una cuenta primero'
+                  : 'Registrar nuevo movimiento'
+              }
               onClick={() => {
                 setEditingTx(null);
                 setModalOpen(true);
               }}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Plus className="h-4 w-4" />
               Nuevo
@@ -220,6 +261,55 @@ export function App() {
 
         {data ? (
           <>
+            {data.accounts.length === 0 && (
+              <section className="rounded-2xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/35 via-zinc-900/90 to-zinc-950 p-5 shadow-xl">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1.5">
+                    <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                      <Sparkles className="h-3 w-3" />
+                      Espacio nuevo listo para configurar
+                    </div>
+                    <h2 className="text-base font-bold text-white">
+                      ¡Empezá creando tus cuentas y tarjetas!
+                    </h2>
+                    <p className="max-w-2xl text-xs text-zinc-300">
+                      Tu espacio arranca limpio: ya tenés categorías y etiquetas base listas para editar, y podés agregar tus bancos, billeteras, ahorros, efectivo o tarjetas desde acá o escribiéndole al bot de Telegram (ej.{' '}
+                      <span className="italic text-zinc-200">
+                        &quot;Creá mi cuenta principal Banco en ARS&quot;
+                      </span>
+                      ).
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openCreateAccountModal('wallet')}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Crear primera cuenta
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openCreateAccountModal('credit_card')}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-800"
+                    >
+                      <CreditCard className="h-4 w-4" />
+                      Agregar tarjeta
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSettingsOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                      Categorías y etiquetas
+                    </button>
+                  </div>
+                </div>
+              </section>
+            )}
+
             <SummaryCards
               summary={data.summary}
               periodLabel={dateRange.label}
@@ -238,10 +328,8 @@ export function App() {
               accounts={data.accounts}
               selectedAccount={selectedAccount}
               onSelectAccount={handleSelectAccount}
-              onSaveInitialBalance={async (id, initial) => {
-                await updateAccountInitialBalance(id, initial);
-                await loadData(dateRange, statementMonth);
-              }}
+              onCreateAccount={() => openCreateAccountModal('wallet')}
+              onEditAccount={openEditAccountModal}
               onReconcileBalance={async (id, realBalance) => {
                 await reconcileAccount(id, realBalance);
                 await loadData(dateRange, statementMonth);
@@ -257,6 +345,8 @@ export function App() {
               defaultPayDate={todayStr()}
               selectedAccount={selectedAccount}
               onSelectAccount={handleSelectAccount}
+              onCreateCard={() => openCreateAccountModal('credit_card')}
+              onEditCard={openEditAccountModal}
               onPayStatement={async (cardId, payload) => {
                 await payCardStatement(cardId, payload);
                 await loadData(dateRange, statementMonth);
@@ -353,6 +443,70 @@ export function App() {
           }}
           onSubmitShared={async (payload) => {
             await createSharedPurchase(payload);
+            await loadData(dateRange, statementMonth);
+          }}
+        />
+      )}
+
+      <AccountModal
+        open={accountModalOpen}
+        editing={editingAccount}
+        defaultType={defaultAccountType}
+        onClose={() => setAccountModalOpen(false)}
+        onCreate={async (payload) => {
+          await createAccount(payload);
+          await loadData(dateRange, statementMonth);
+        }}
+        onUpdate={async (id, patch) => {
+          await updateAccount(id, patch);
+          await loadData(dateRange, statementMonth);
+        }}
+        onDelete={async (id) => {
+          await deleteAccount(id);
+          if (selectedAccount === id) setSelectedAccount('');
+          await loadData(dateRange, statementMonth);
+        }}
+      />
+
+      {data && (
+        <SettingsModal
+          open={settingsOpen}
+          accounts={data.accounts}
+          categories={data.categories}
+          tags={data.tags}
+          onClose={() => setSettingsOpen(false)}
+          onCreateAccount={(accType) => {
+            setSettingsOpen(false);
+            openCreateAccountModal(accType);
+          }}
+          onEditAccount={(acc) => {
+            setSettingsOpen(false);
+            openEditAccountModal(acc);
+          }}
+          onCreateCategory={async (payload) => {
+            await createCategory(payload);
+            await loadData(dateRange, statementMonth);
+          }}
+          onUpdateCategory={async (id, patch) => {
+            await updateCategory(id, patch);
+            await loadData(dateRange, statementMonth);
+          }}
+          onDeleteCategory={async (id) => {
+            await deleteCategory(id);
+            if (selectedCategory === id) setSelectedCategory('');
+            await loadData(dateRange, statementMonth);
+          }}
+          onCreateTag={async (name, color) => {
+            await createTag(name, color);
+            await loadData(dateRange, statementMonth);
+          }}
+          onUpdateTag={async (id, patch) => {
+            await updateTag(id, patch);
+            await loadData(dateRange, statementMonth);
+          }}
+          onDeleteTag={async (id) => {
+            await deleteTag(id);
+            if (selectedTag === id) setSelectedTag('');
             await loadData(dateRange, statementMonth);
           }}
         />

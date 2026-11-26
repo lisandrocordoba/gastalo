@@ -1,6 +1,9 @@
 import type {
+  AccountType,
+  AccountWithBalance,
   AccountingBasis,
   BootstrapResponse,
+  Category,
   RecurringItem,
   Tag,
   Transaction,
@@ -153,11 +156,45 @@ export function deleteTransaction(id: string): Promise<{ ok: boolean }> {
   });
 }
 
-export function updateAccountInitialBalance(id: string, initial_balance: number): Promise<unknown> {
+export function createAccount(payload: {
+  name: string;
+  type: AccountType;
+  currency: string;
+  initial_balance?: number;
+  color?: string;
+  is_default?: number;
+}): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
+  return apiFetch('/api/accounts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAccount(
+  id: string,
+  patch: Partial<{
+    name: string;
+    type: AccountType;
+    currency: string;
+    initial_balance: number;
+    color: string;
+    is_default: number;
+  }>
+): Promise<{ account: AccountWithBalance; accounts: AccountWithBalance[] }> {
   return apiFetch(`/api/accounts/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ initial_balance }),
+    body: JSON.stringify(patch),
   });
+}
+
+export function deleteAccount(id: string): Promise<{ ok: boolean; accounts: AccountWithBalance[] }> {
+  return apiFetch(`/api/accounts/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function updateAccountInitialBalance(id: string, initial_balance: number): Promise<unknown> {
+  return updateAccount(id, { initial_balance });
 }
 
 export function reconcileAccount(
@@ -188,10 +225,59 @@ export function payCardStatement(
   });
 }
 
+export function createCategory(payload: {
+  name: string;
+  icon: string;
+  type: 'expense' | 'income' | 'both';
+  color: string;
+}): Promise<{ category: Category; categories: Category[] }> {
+  return apiFetch('/api/categories', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateCategory(
+  id: string,
+  patch: Partial<{
+    name: string;
+    icon: string;
+    type: 'expense' | 'income' | 'both';
+    color: string;
+  }>
+): Promise<{ category: Category; categories: Category[] }> {
+  return apiFetch(`/api/categories/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteCategory(id: string): Promise<{ ok: boolean; categories: Category[] }> {
+  return apiFetch(`/api/categories/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function createTag(name: string, color?: string): Promise<{ tag: Tag }> {
   return apiFetch('/api/tags', {
     method: 'POST',
     body: JSON.stringify({ name, color }),
+  });
+}
+
+export function updateTag(
+  id: string,
+  patch: Partial<{ name: string; color: string }>
+): Promise<{ tag: Tag; tags: Tag[] }> {
+  return apiFetch(`/api/tags/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteTag(id: string): Promise<{ ok: boolean; tags: Tag[] }> {
+  return apiFetch(`/api/tags/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
 }
 

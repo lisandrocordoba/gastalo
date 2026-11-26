@@ -46,9 +46,9 @@ export function TransactionModal({
   const [type, setType] = useState<TransactionType>('expense');
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState('ARS');
-  const [accountId, setAccountId] = useState('mp');
-  const [toAccountId, setToAccountId] = useState('mp_reservas');
-  const [categoryId, setCategoryId] = useState('supermercado');
+  const [accountId, setAccountId] = useState('');
+  const [toAccountId, setToAccountId] = useState('');
+  const [categoryId, setCategoryId] = useState('');
   const [description, setDescription] = useState('');
   const [occurredAt, setOccurredAt] = useState(defaultDate);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -65,17 +65,26 @@ export function TransactionModal({
     if (!open) return;
     setError('');
     setNewTagInput('');
+    const defAcc =
+      accounts.find((a) => a.is_default === 1 && a.type !== 'credit_card') ??
+      accounts.find((a) => a.type !== 'credit_card') ??
+      accounts[0];
+    const defAccId = defAcc?.id ?? '';
+    const defToAcc =
+      accounts.find((a) => a.type === 'savings' && a.id !== defAccId) ??
+      accounts.find((a) => a.id !== defAccId) ??
+      defAcc;
+    const defExpenseCat = categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? '';
+    const defIncomeCat = categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? '';
+
     if (editing) {
       setType(editing.type);
       setAmount(String(editing.amount));
       setCurrency(editing.currency);
       setAccountId(editing.account_id);
-      setToAccountId(editing.to_account_id || 'mp_reservas');
+      setToAccountId(editing.to_account_id || defToAcc?.id || '');
       setCategoryId(
-        editing.category_id ||
-          (editing.type === 'income'
-            ? 'sueldo'
-            : categories.find((c) => c.type === 'expense')?.id ?? 'supermercado')
+        editing.category_id || (editing.type === 'income' ? defIncomeCat : defExpenseCat)
       );
       setDescription(editing.description);
       setOccurredAt(editing.occurred_at);
@@ -86,13 +95,12 @@ export function TransactionModal({
       setIsShared(false);
       setSharedAmount('');
     } else {
-      const defAcc = accounts.find((a) => a.is_default)?.id ?? accounts[0]?.id ?? 'mp';
       setType('expense');
       setAmount('');
-      setCurrency('ARS');
-      setAccountId(defAcc);
-      setToAccountId('mp_reservas');
-      setCategoryId(categories.find((c) => c.type === 'expense')?.id ?? 'supermercado');
+      setCurrency(defAcc?.currency ?? 'ARS');
+      setAccountId(defAccId);
+      setToAccountId(defToAcc?.id ?? '');
+      setCategoryId(defExpenseCat);
       setDescription('');
       setOccurredAt(defaultDate);
       setSelectedTags([]);
@@ -250,9 +258,15 @@ export function TransactionModal({
                   type="button"
                   onClick={() => {
                     setType(t.id);
-                    if (t.id === 'income') setCategoryId('sueldo');
+                    if (t.id === 'income') {
+                      setCategoryId(
+                        categories.find((c) => c.type === 'income' || c.type === 'both')?.id ?? ''
+                      );
+                    }
                     if (t.id === 'expense') {
-                      setCategoryId(categories.find((c) => c.type === 'expense')?.id ?? 'supermercado');
+                      setCategoryId(
+                        categories.find((c) => c.type === 'expense' || c.type === 'both')?.id ?? ''
+                      );
                     }
                     if (t.id !== 'expense') setIsShared(false);
                   }}
@@ -408,7 +422,7 @@ export function TransactionModal({
                   type="text"
                   value={thirdPartyName}
                   onChange={(e) => setThirdPartyName(e.target.value)}
-                  placeholder="Ej: Jere"
+                  placeholder="Ej: Ana / Juan"
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
                 />
               </div>
