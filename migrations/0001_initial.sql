@@ -1,4 +1,6 @@
--- Initial schema for Gasti Personal (Wallet)
+-- Clean agnostic schema v3 for Gasti Personal
+-- Starts with 0 accounts and 0 transactions so every user configures
+-- their own wallets, savings accounts, cash, and credit cards from Web or Telegram.
 
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
@@ -6,6 +8,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   type TEXT NOT NULL CHECK(type IN ('wallet', 'savings', 'credit_card', 'cash')),
   currency TEXT NOT NULL DEFAULT 'ARS',
   initial_balance REAL NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '#009EE3',
   is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
@@ -20,8 +23,8 @@ CREATE TABLE IF NOT EXISTS categories (
 
 CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK(type IN ('expense', 'income', 'transfer')),
-  amount REAL NOT NULL CHECK(amount > 0),
+  type TEXT NOT NULL CHECK(type IN ('expense', 'income', 'transfer', 'investment', 'third_party', 'third_party_repayment', 'adjustment')),
+  amount REAL NOT NULL CHECK((type = 'adjustment' AND amount != 0) OR amount > 0),
   currency TEXT NOT NULL DEFAULT 'ARS',
   account_id TEXT NOT NULL REFERENCES accounts(id),
   to_account_id TEXT REFERENCES accounts(id),
@@ -31,35 +34,81 @@ CREATE TABLE IF NOT EXISTS transactions (
   source TEXT NOT NULL,
   raw_input TEXT,
   telegram_message_id INTEGER,
+  installments_total INTEGER CHECK(installments_total IS NULL OR installments_total >= 1),
+  first_installment_month TEXT,
+  statement_month TEXT,
+  third_party_name TEXT,
+  linked_group_id TEXT,
   created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_occurred_at ON transactions(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_account_id ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_category_id ON transactions(category_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+CREATE INDEX IF NOT EXISTS idx_transactions_linked_group_id ON transactions(linked_group_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_installments
+  ON transactions(first_installment_month)
+  WHERE installments_total IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_statement_month
+  ON transactions(statement_month)
+  WHERE statement_month IS NOT NULL;
 
--- Default accounts
-INSERT OR IGNORE INTO accounts (id, name, type, currency, initial_balance, is_default, created_at) VALUES
-  ('mp', 'Mercado Pago', 'wallet', 'ARS', 0, 1, datetime('now')),
-  ('mp_reservas', 'MP Reservas', 'savings', 'ARS', 0, 0, datetime('now')),
-  ('bbva_credito', 'BBVA Crédito', 'credit_card', 'ARS', 0, 0, datetime('now')),
-  ('efectivo', 'Efectivo', 'cash', 'ARS', 0, 0, datetime('now'));
+CREATE TABLE IF NOT EXISTS tags (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  color TEXT NOT NULL
+);
 
--- Expense categories
+CREATE TABLE IF NOT EXISTS transaction_tags (
+  transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (transaction_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_tags_tag_id ON transaction_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS recurring_items (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('expense', 'income')),
+  amount REAL NOT NULL CHECK(amount > 0),
+  currency TEXT NOT NULL DEFAULT 'ARS',
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  category_id TEXT REFERENCES categories(id),
+  day_of_month INTEGER CHECK(day_of_month IS NULL OR (day_of_month >= 1 AND day_of_month <= 31)),
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+-- Generic editable base categories (17 expense + 4 income)
 INSERT OR IGNORE INTO categories (id, name, icon, type, color) VALUES
-  ('comida', 'Comida y Salidas', '🍽️', 'expense', '#f97316'),
-  ('supermercado', 'Supermercado', '🛒', 'expense', '#22c55e'),
-  ('transporte', 'Transporte', '🚌', 'expense', '#3b82f6'),
-  ('servicios', 'Servicios y Hogar', '💡', 'expense', '#eab308'),
-  ('salud', 'Salud y Farmacia', '💊', 'expense', '#ef4444'),
-  ('compras', 'Compras', '🛍️', 'expense', '#a855f7'),
-  ('entretenimiento', 'Entretenimiento', '🎬', 'expense', '#ec4899'),
-  ('educacion', 'Educación', '📚', 'expense', '#06b6d4'),
-  ('impuestos', 'Impuestos', '🧾', 'expense', '#64748b'),
-  ('otros', 'Otros', '📦', 'expense', '#71717a');
+  ('supermercado', 'Supermercado', '🛒', 'expense', '#FF9800'),
+  ('servicios', 'Servicios', '💡', 'expense', '#FB8C00'),
+  ('mascotas', 'Mascotas', '🐾', 'expense', '#FFA726'),
+  ('comida_afuera', 'Comida afuera / Delivery', '🍔', 'expense', '#F44336'),
+  ('kiosco_cafe', 'Kiosco / Café / Snacks', '🍫', 'expense', '#FF7043'),
+  ('compras_ropa', 'Compras y Ropa', '🛍️', 'expense', '#29B6F6'),
+  ('regalos', 'Regalos', '🎁', 'expense', '#4FC3F7'),
+  ('cuidado_personal', 'Cuidado personal', '💇', 'expense', '#03A9F4'),
+  ('transporte_publico', 'Transporte público', '🚌', 'expense', '#78909C'),
+  ('uber_taxi', 'Uber / Taxi', '🚕', 'expense', '#607D8B'),
+  ('auto', 'Auto', '🚗', 'expense', '#AA00FF'),
+  ('salidas_social', 'Salidas / Social', '🥂', 'expense', '#64DD17'),
+  ('deporte', 'Deporte / Fitness', '⚽', 'expense', '#00E676'),
+  ('educacion', 'Educación', '📚', 'expense', '#4CAF50'),
+  ('salud', 'Salud', '💊', 'expense', '#26A69A'),
+  ('suscripciones', 'Suscripciones', '📱', 'expense', '#536DFE'),
+  ('otros', 'Otros / Trámites', '📦', 'expense', '#9E9E9E'),
+  ('sueldo', 'Sueldo / Trabajo', '💼', 'income', '#FBC02D'),
+  ('rendimientos', 'Rendimientos', '📈', 'income', '#FDD835'),
+  ('reintegros', 'Reintegros', '🔄', 'income', '#00BFA5'),
+  ('otros_ingresos', 'Otros ingresos', '💰', 'income', '#F9A825');
 
--- Income categories
-INSERT OR IGNORE INTO categories (id, name, icon, type, color) VALUES
-  ('sueldo', 'Sueldo', '💼', 'income', '#10b981'),
-  ('rendimientos', 'Rendimientos MP', '📈', 'income', '#14b8a6'),
-  ('otros_ingresos', 'Otros Ingresos', '💰', 'income', '#84cc16');
+-- Generic editable base tags
+INSERT OR IGNORE INTO tags (id, name, color) VALUES
+  ('casa', 'casa', '#FF9800'),
+  ('hormiga', 'hormiga', '#FF7043'),
+  ('familia', 'familia', '#64DD17'),
+  ('vacaciones', 'vacaciones', '#29B6F6'),
+  ('emergencia', 'emergencia', '#F44336');

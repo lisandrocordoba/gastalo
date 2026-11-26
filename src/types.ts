@@ -33,9 +33,24 @@ export interface Account {
   type: AccountType;
   currency: string;
   initial_balance: number;
+  color: string;
   is_default: number;
   created_at: string;
 }
+
+export interface AccountInput {
+  id?: string;
+  name: string;
+  type: AccountType;
+  currency?: string;
+  initial_balance?: number;
+  color?: string;
+  is_default?: number;
+}
+
+export type AccountPatch = Partial<
+  Pick<Account, 'name' | 'type' | 'currency' | 'initial_balance' | 'color' | 'is_default'>
+>;
 
 export interface AccountWithBalance extends Account {
   balance: number;
@@ -49,11 +64,23 @@ export interface Category {
   color: string;
 }
 
+export interface CategoryInput {
+  id?: string;
+  name: string;
+  icon: string;
+  type: CategoryType;
+  color: string;
+}
+
+export type CategoryPatch = Partial<Pick<Category, 'name' | 'icon' | 'type' | 'color'>>;
+
 export interface Tag {
   id: string;
   name: string;
   color: string;
 }
+
+export type TagPatch = Partial<Pick<Tag, 'name' | 'color'>>;
 
 export interface Transaction {
   id: string;

@@ -17,6 +17,7 @@ export interface AccountWithBalance {
   type: AccountType;
   currency: string;
   initial_balance: number;
+  color: string;
   is_default: number;
   balance: number;
 }

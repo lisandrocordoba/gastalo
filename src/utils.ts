@@ -1,5 +1,33 @@
+import type { AccountType } from './types';
+
 export function shortId(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+}
+
+export function slugifyId(name: string, maxLen = 40): string {
+  const base = name
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, maxLen)
+    .replace(/_+$/g, '');
+  return base || shortId().slice(0, 8);
+}
+
+export function defaultColorForAccountType(type: AccountType): string {
+  switch (type) {
+    case 'cash':
+      return '#22C55E';
+    case 'savings':
+      return '#0EA5E9';
+    case 'credit_card':
+      return '#18181B';
+    default:
+      return '#009EE3';
+  }
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {

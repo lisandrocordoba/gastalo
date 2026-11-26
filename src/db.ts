@@ -1,11 +1,16 @@
 import type {
   Account,
+  AccountInput,
+  AccountPatch,
+  AccountType,
   AccountWithBalance,
   AccountingBasis,
   CardStatement,
   CardStatementItem,
   Category,
   CategoryBreakdown,
+  CategoryInput,
+  CategoryPatch,
   FutureProjection,
   MonthProjection,
   MonthSummary,
@@ -17,12 +22,57 @@ import type {
   SharedPurchaseInput,
   Tag,
   TagBreakdown,
+  TagPatch,
   ThirdPartyBalance,
   Transaction,
   TransactionInput,
   TransactionType,
 } from './types';
-import { addMonths, getMonthDateRange, monthDiff, previousMonths, shortId, slugifyTag } from './utils';
+import {
+  addMonths,
+  defaultColorForAccountType,
+  getMonthDateRange,
+  monthDiff,
+  previousMonths,
+  shortId,
+  slugifyId,
+  slugifyTag,
+} from './utils';
+
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
+export function pickDefaultLiquidAccount<
+  T extends Pick<Account, 'id' | 'type' | 'currency' | 'is_default'>,
+>(accounts: T[], preferredCurrency?: string): T | null {
+  const liquid = accounts.filter((a) => a.type !== 'credit_card');
+  if (liquid.length === 0) return null;
+
+  if (preferredCurrency) {
+    const exactDefault = liquid.find(
+      (a) => a.is_default === 1 && a.currency === preferredCurrency
+    );
+    if (exactDefault) return exactDefault;
+    const exactAny = liquid.find((a) => a.currency === preferredCurrency);
+    if (exactAny) return exactAny;
+  }
+
+  return liquid.find((a) => a.is_default === 1) ?? liquid[0];
+}
+
+export function computeSavingsBalance(
+  accounts: Pick<AccountWithBalance, 'type' | 'currency' | 'balance'>[],
+  currency = 'ARS'
+): number {
+  const total = accounts
+    .filter((a) => a.type === 'savings' && a.currency === currency)
+    .reduce((sum, a) => sum + a.balance, 0);
+  return round2(total);
+}
 
 type RawTransactionRow = Omit<Transaction, 'tags'>;
 
@@ -496,9 +546,28 @@ async function syncTransactionTags(
   await db.batch(stmts);
 }
 
+const VALID_ACCOUNT_TYPES = new Set<AccountType>(['wallet', 'savings', 'credit_card', 'cash']);
+
+async function generateUniqueId(
+  db: D1Database,
+  table: 'accounts' | 'categories',
+  name: string,
+  explicitId?: string
+): Promise<string> {
+  const base = slugifyId(explicitId || name);
+  let candidate = base;
+  let suffix = 2;
+  while (true) {
+    const existing = await db.prepare(`SELECT id FROM ${table} WHERE id = ?`).bind(candidate).first();
+    if (!existing) return candidate;
+    candidate = `${base}_${suffix}`;
+    suffix++;
+  }
+}
+
 export async function listAccountsWithBalances(db: D1Database): Promise<AccountWithBalance[]> {
   const [accRes, txRes] = await Promise.all([
-    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, name ASC').all<Account>(),
+    db.prepare('SELECT * FROM accounts ORDER BY is_default DESC, created_at ASC, name ASC').all<Account>(),
     db
       .prepare('SELECT type, amount, account_id, to_account_id FROM transactions')
       .all<Pick<Transaction, 'type' | 'amount' | 'account_id' | 'to_account_id'>>(),
@@ -507,16 +576,172 @@ export async function listAccountsWithBalances(db: D1Database): Promise<AccountW
   return computeAccountBalances(accRes.results ?? [], txRes.results ?? []);
 }
 
+export async function createAccount(db: D1Database, input: AccountInput): Promise<AccountWithBalance> {
+  if (!VALID_ACCOUNT_TYPES.has(input.type)) {
+    throw new Error('Tipo de cuenta inválido');
+  }
+  const cleanName = input.name.trim().slice(0, 60);
+  if (!cleanName) {
+    throw new Error('El nombre de la cuenta es obligatorio');
+  }
+
+  const id = await generateUniqueId(db, 'accounts', cleanName, input.id);
+  const currency = (input.currency || 'ARS').trim().toUpperCase().slice(0, 6) || 'ARS';
+  const initialBalance =
+    typeof input.initial_balance === 'number' && Number.isFinite(input.initial_balance)
+      ? round2(input.initial_balance)
+      : 0;
+  const color = input.color?.trim() || defaultColorForAccountType(input.type);
+  const createdAt = new Date().toISOString();
+
+  let isDefault = input.type === 'credit_card' ? 0 : input.is_default ? 1 : 0;
+  if (input.type !== 'credit_card' && isDefault === 0) {
+    const existingDefault = await db
+      .prepare("SELECT id FROM accounts WHERE type != 'credit_card' AND is_default = 1 LIMIT 1")
+      .first();
+    if (!existingDefault) {
+      isDefault = 1;
+    }
+  }
+
+  if (isDefault === 1) {
+    await db.prepare('UPDATE accounts SET is_default = 0').run();
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO accounts (id, name, type, currency, initial_balance, color, is_default, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(id, cleanName, input.type, currency, initialBalance, color, isDefault, createdAt)
+    .run();
+
+  const accounts = await listAccountsWithBalances(db);
+  const created = accounts.find((a) => a.id === id);
+  if (!created) throw new Error('No se pudo recuperar la cuenta creada');
+  return created;
+}
+
+export async function updateAccount(
+  db: D1Database,
+  id: string,
+  patch: AccountPatch
+): Promise<AccountWithBalance | null> {
+  const existing = await db.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first<Account>();
+  if (!existing) return null;
+
+  const nextName = patch.name !== undefined ? patch.name.trim().slice(0, 60) : existing.name;
+  if (!nextName) {
+    throw new Error('El nombre de la cuenta no puede quedar vacío');
+  }
+
+  const nextType = patch.type ?? existing.type;
+  if (!VALID_ACCOUNT_TYPES.has(nextType)) {
+    throw new Error('Tipo de cuenta inválido');
+  }
+
+  const nextCurrency =
+    patch.currency !== undefined
+      ? patch.currency.trim().toUpperCase().slice(0, 6) || existing.currency
+      : existing.currency;
+
+  if (nextCurrency !== existing.currency) {
+    const refTx = await db
+      .prepare('SELECT COUNT(*) AS cnt FROM transactions WHERE account_id = ? OR to_account_id = ?')
+      .bind(id, id)
+      .first<{ cnt: number }>();
+    if ((refTx?.cnt ?? 0) > 0) {
+      throw new ConflictError(
+        'No se puede cambiar la moneda de una cuenta que ya tiene movimientos registrados.'
+      );
+    }
+  }
+
+  const nextInitial =
+    patch.initial_balance !== undefined && Number.isFinite(patch.initial_balance)
+      ? round2(patch.initial_balance)
+      : existing.initial_balance;
+  const nextColor = patch.color !== undefined ? patch.color.trim() || existing.color : existing.color;
+
+  let nextIsDefault =
+    nextType === 'credit_card'
+      ? 0
+      : patch.is_default !== undefined
+        ? patch.is_default
+          ? 1
+          : 0
+        : existing.is_default;
+
+  if (nextIsDefault === 1) {
+    await db.prepare('UPDATE accounts SET is_default = 0 WHERE id != ?').bind(id).run();
+  }
+
+  await db
+    .prepare(
+      `UPDATE accounts
+       SET name = ?, type = ?, currency = ?, initial_balance = ?, color = ?, is_default = ?
+       WHERE id = ?`
+    )
+    .bind(nextName, nextType, nextCurrency, nextInitial, nextColor, nextIsDefault, id)
+    .run();
+
+  if (existing.is_default === 1 && nextIsDefault === 0) {
+    const fallback = await db
+      .prepare("SELECT id FROM accounts WHERE type != 'credit_card' AND id != ? ORDER BY created_at ASC LIMIT 1")
+      .bind(id)
+      .first<{ id: string }>();
+    if (fallback) {
+      await db.prepare('UPDATE accounts SET is_default = 1 WHERE id = ?').bind(fallback.id).run();
+    }
+  }
+
+  const accounts = await listAccountsWithBalances(db);
+  return accounts.find((a) => a.id === id) ?? null;
+}
+
+export async function deleteAccount(db: D1Database, id: string): Promise<boolean> {
+  const existing = await db.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first<Account>();
+  if (!existing) return false;
+
+  const [txRefs, recRefs] = await Promise.all([
+    db
+      .prepare('SELECT COUNT(*) AS cnt FROM transactions WHERE account_id = ? OR to_account_id = ?')
+      .bind(id, id)
+      .first<{ cnt: number }>(),
+    db
+      .prepare('SELECT COUNT(*) AS cnt FROM recurring_items WHERE account_id = ?')
+      .bind(id)
+      .first<{ cnt: number }>(),
+  ]);
+
+  const txCount = txRefs?.cnt ?? 0;
+  const recCount = recRefs?.cnt ?? 0;
+  if (txCount > 0 || recCount > 0) {
+    throw new ConflictError(
+      `No se puede eliminar "${existing.name}" porque tiene ${txCount} movimientos y ${recCount} gastos fijos vinculados.`
+    );
+  }
+
+  await db.prepare('DELETE FROM accounts WHERE id = ?').bind(id).run();
+
+  if (existing.is_default === 1) {
+    const fallback = await db
+      .prepare("SELECT id FROM accounts WHERE type != 'credit_card' ORDER BY created_at ASC LIMIT 1")
+      .first<{ id: string }>();
+    if (fallback) {
+      await db.prepare('UPDATE accounts SET is_default = 1 WHERE id = ?').bind(fallback.id).run();
+    }
+  }
+
+  return true;
+}
+
 export async function updateAccountInitialBalance(
   db: D1Database,
   accountId: string,
   initialBalance: number
 ): Promise<Account | null> {
-  await db
-    .prepare('UPDATE accounts SET initial_balance = ? WHERE id = ?')
-    .bind(initialBalance, accountId)
-    .run();
-  return db.prepare('SELECT * FROM accounts WHERE id = ?').bind(accountId).first<Account>();
+  return updateAccount(db, accountId, { initial_balance: initialBalance });
 }
 
 export async function reconcileAccountBalance(
@@ -560,12 +785,19 @@ export async function payCardStatement(
   accounts: AccountWithBalance[];
   cardStatements: CardStatement[];
 }> {
-  const card = await db
-    .prepare("SELECT * FROM accounts WHERE id = ? AND type = 'credit_card'")
-    .bind(input.card_account_id)
-    .first<Account>();
+  const allAccounts = await listAccountsWithBalances(db);
+  const card = allAccounts.find((a) => a.id === input.card_account_id && a.type === 'credit_card');
   if (!card) {
     throw new Error('Tarjeta no encontrada');
+  }
+
+  const fromAcc =
+    (input.from_account_id
+      ? allAccounts.find((a) => a.id === input.from_account_id && a.type !== 'credit_card')
+      : null) ?? pickDefaultLiquidAccount(allAccounts, card.currency);
+
+  if (!fromAcc) {
+    throw new Error('Creá al menos una cuenta líquida antes de registrar el pago del resumen.');
   }
 
   let feesTx: Transaction | null = null;
@@ -590,7 +822,7 @@ export async function payCardStatement(
     type: 'transfer',
     amount: totalPaid,
     currency: card.currency,
-    account_id: input.from_account_id || 'mp',
+    account_id: fromAcc.id,
     to_account_id: card.id,
     description:
       input.description?.trim() || `Pago resumen ${card.name} ${input.statement_month}`,
@@ -613,6 +845,67 @@ export async function listCategories(db: D1Database): Promise<Category[]> {
   return res.results ?? [];
 }
 
+export async function createCategory(db: D1Database, input: CategoryInput): Promise<Category> {
+  const cleanName = input.name.trim().slice(0, 60);
+  if (!cleanName) throw new Error('Nombre de categoría obligatorio');
+  const id = await generateUniqueId(db, 'categories', cleanName, input.id);
+  const icon = input.icon.trim() || '📦';
+  const color = input.color.trim() || '#9E9E9E';
+  const type = input.type === 'income' || input.type === 'both' ? input.type : 'expense';
+
+  await db
+    .prepare('INSERT INTO categories (id, name, icon, type, color) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, cleanName, icon, type, color)
+    .run();
+
+  const row = await db.prepare('SELECT * FROM categories WHERE id = ?').bind(id).first<Category>();
+  if (!row) throw new Error('No se pudo crear la categoría');
+  return row;
+}
+
+export async function updateCategory(
+  db: D1Database,
+  id: string,
+  patch: CategoryPatch
+): Promise<Category | null> {
+  const existing = await db.prepare('SELECT * FROM categories WHERE id = ?').bind(id).first<Category>();
+  if (!existing) return null;
+
+  const nextName = patch.name !== undefined ? patch.name.trim().slice(0, 60) : existing.name;
+  if (!nextName) throw new Error('Nombre de categoría inválido');
+  const nextIcon = patch.icon !== undefined ? patch.icon.trim() || existing.icon : existing.icon;
+  const nextColor = patch.color !== undefined ? patch.color.trim() || existing.color : existing.color;
+  const nextType = patch.type ?? existing.type;
+
+  await db
+    .prepare('UPDATE categories SET name = ?, icon = ?, type = ?, color = ? WHERE id = ?')
+    .bind(nextName, nextIcon, nextType, nextColor, id)
+    .run();
+
+  return db.prepare('SELECT * FROM categories WHERE id = ?').bind(id).first<Category>();
+}
+
+export async function deleteCategory(db: D1Database, id: string): Promise<boolean> {
+  const existing = await db.prepare('SELECT * FROM categories WHERE id = ?').bind(id).first<Category>();
+  if (!existing) return false;
+
+  const [txRefs, recRefs] = await Promise.all([
+    db.prepare('SELECT COUNT(*) AS cnt FROM transactions WHERE category_id = ?').bind(id).first<{ cnt: number }>(),
+    db.prepare('SELECT COUNT(*) AS cnt FROM recurring_items WHERE category_id = ?').bind(id).first<{ cnt: number }>(),
+  ]);
+
+  const txCount = txRefs?.cnt ?? 0;
+  const recCount = recRefs?.cnt ?? 0;
+  if (txCount > 0 || recCount > 0) {
+    throw new ConflictError(
+      `No se puede eliminar "${existing.name}" porque tiene ${txCount} movimientos y ${recCount} gastos fijos vinculados.`
+    );
+  }
+
+  await db.prepare('DELETE FROM categories WHERE id = ?').bind(id).run();
+  return true;
+}
+
 export async function listTags(db: D1Database): Promise<Tag[]> {
   const res = await db.prepare('SELECT * FROM tags ORDER BY name ASC').all<Tag>();
   return res.results ?? [];
@@ -631,6 +924,23 @@ export async function createTag(db: D1Database, name: string, color = '#71717a')
   const row = await db.prepare('SELECT * FROM tags WHERE id = ?').bind(id).first<Tag>();
   if (!row) throw new Error('No se pudo crear la etiqueta');
   return row;
+}
+
+export async function updateTag(db: D1Database, id: string, patch: TagPatch): Promise<Tag | null> {
+  const existing = await db.prepare('SELECT * FROM tags WHERE id = ?').bind(id).first<Tag>();
+  if (!existing) return null;
+
+  const nextName =
+    patch.name !== undefined ? patch.name.trim().replace(/^#/, '') || existing.name : existing.name;
+  const nextColor = patch.color !== undefined ? patch.color.trim() || existing.color : existing.color;
+
+  await db.prepare('UPDATE tags SET name = ?, color = ? WHERE id = ?').bind(nextName, nextColor, id).run();
+  return db.prepare('SELECT * FROM tags WHERE id = ?').bind(id).first<Tag>();
+}
+
+export async function deleteTag(db: D1Database, id: string): Promise<boolean> {
+  const res = await db.prepare('DELETE FROM tags WHERE id = ?').bind(id).run();
+  return (res.meta.changes ?? 0) > 0;
 }
 
 export async function createTransaction(db: D1Database, input: TransactionInput): Promise<Transaction> {
@@ -1032,15 +1342,17 @@ export async function deleteRecurringItem(db: D1Database, id: string): Promise<b
 export async function getFutureProjection(
   db: D1Database,
   startMonth: string,
-  monthsAhead = 3
+  monthsAhead = 3,
+  currency = 'ARS'
 ): Promise<FutureProjection> {
   const [txRes, recurring, accounts] = await Promise.all([
     db
       .prepare(
         `SELECT id, type, amount, currency, account_id, description, installments_total, first_installment_month, third_party_name
          FROM transactions
-         WHERE installments_total IS NOT NULL AND installments_total >= 1 AND currency = 'ARS'`
+         WHERE installments_total IS NOT NULL AND installments_total >= 1 AND currency = ?`
       )
+      .bind(currency)
       .all<
         Pick<
           Transaction,
@@ -1059,6 +1371,6 @@ export async function getFutureProjection(
     listAccountsWithBalances(db),
   ]);
 
-  const reservas = accounts.find((a) => a.id === 'mp_reservas')?.balance ?? 0;
+  const reservas = computeSavingsBalance(accounts, currency);
   return computeFutureProjection(txRes.results ?? [], recurring, reservas, startMonth, monthsAhead);
 }

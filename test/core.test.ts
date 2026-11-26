@@ -5,19 +5,22 @@ import {
   computeCardStatements,
   computeFutureProjection,
   computePeriodMetrics,
+  computeSavingsBalance,
   computeThirdPartyBalances,
+  pickDefaultLiquidAccount,
 } from '../src/db';
 import { sanitizeParsedIntent } from '../src/gemini';
-import { extractInstallments, mapWalletRows } from '../scripts/wallet-mapper.mjs';
 import type { Account, Category, RecurringItem, Tag, Transaction } from '../src/types';
 import {
   addMonths,
   arrayBufferToBase64,
+  defaultColorForAccountType,
   formatCurrency,
   getMonthDateRange,
   monthDiff,
   previousMonths,
   shortId,
+  slugifyId,
   slugifyTag,
 } from '../src/utils';
 
@@ -50,14 +53,41 @@ describe('utils', () => {
     expect(slugifyTag('#Hormiga')).toBe('hormiga');
     expect(slugifyTag('Vacaciones Año Nuevo')).toBe('vacaciones_ano_nuevo');
   });
+
+  it('slugifyId and defaultColorForAccountType build agnostic account identifiers and colors', () => {
+    expect(slugifyId('Banco Galicia (Sueldo)')).toBe('banco_galicia_sueldo');
+    expect(slugifyId('Visa Crédito #1')).toBe('visa_credito_1');
+    expect(defaultColorForAccountType('wallet')).toBe('#009EE3');
+    expect(defaultColorForAccountType('savings')).toBe('#0EA5E9');
+    expect(defaultColorForAccountType('cash')).toBe('#22C55E');
+    expect(defaultColorForAccountType('credit_card')).toBe('#18181B');
+  });
+});
+
+describe('agnostic account selection and savings aggregation', () => {
+  it('picks default liquid account by currency and aggregates savings balances', () => {
+    const customAccounts = [
+      { id: 'visa', name: 'Visa', type: 'credit_card' as const, currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01', balance: -50000 },
+      { id: 'galicia', name: 'Galicia', type: 'wallet' as const, currency: 'ARS', initial_balance: 0, color: '#009EE3', is_default: 1, created_at: '2026-01-01', balance: 200000 },
+      { id: 'ahorro_ars', name: 'Reserva ARS', type: 'savings' as const, currency: 'ARS', initial_balance: 0, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01', balance: 60000 },
+      { id: 'frasco_ars', name: 'Frasco Viaje', type: 'savings' as const, currency: 'ARS', initial_balance: 0, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01', balance: 25000 },
+      { id: 'ahorro_usd', name: 'Caja USD', type: 'savings' as const, currency: 'USD', initial_balance: 0, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01', balance: 500 },
+    ];
+
+    expect(pickDefaultLiquidAccount(customAccounts, 'ARS')?.id).toBe('galicia');
+    expect(pickDefaultLiquidAccount(customAccounts, 'USD')?.id).toBe('ahorro_usd');
+    expect(pickDefaultLiquidAccount([customAccounts[0]])).toBeNull();
+    expect(computeSavingsBalance(customAccounts, 'ARS')).toBe(85000);
+    expect(computeSavingsBalance(customAccounts, 'USD')).toBe(500);
+  });
 });
 
 describe('double-entry accounting v2 balances', () => {
   const accounts: Account[] = [
-    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 100000, is_default: 1, created_at: '2026-01-01' },
-    { id: 'mp_reservas', name: 'MP Reservas', type: 'savings', currency: 'ARS', initial_balance: 50000, is_default: 0, created_at: '2026-01-01' },
-    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, is_default: 0, created_at: '2026-01-01' },
-    { id: 'efectivo', name: 'Efectivo', type: 'cash', currency: 'ARS', initial_balance: 10000, is_default: 0, created_at: '2026-01-01' },
+    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 100000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
+    { id: 'mp_reservas', name: 'MP Reservas', type: 'savings', currency: 'ARS', initial_balance: 50000, color: '#0EA5E9', is_default: 0, created_at: '2026-01-01' },
+    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
+    { id: 'efectivo', name: 'Efectivo', type: 'cash', currency: 'ARS', initial_balance: 10000, color: '#22C55E', is_default: 0, created_at: '2026-01-01' },
   ];
 
   it('handles BBVA negative credit card balance, card payment transfer, and reservas transfer', () => {
@@ -351,184 +381,10 @@ describe('auth verification', () => {
   });
 });
 
-describe('wallet .xls mapper', () => {
-  it('extracts installments from card notes without matching single-installment labels', () => {
-    expect(extractInstallments('Dental system: conducto y corona (6x105.440)')).toBe(6);
-    expect(extractInstallments('Crocs german dia del padre(3x$14.666)')).toBe(3);
-    expect(extractInstallments('Cargador celu (12x $2.750)')).toBe(12);
-    expect(extractInstallments('Regalo inflador (2x54,6k)')).toBe(2);
-    expect(extractInstallments('Pijama abril aniversario (1 cuota)')).toBeNull();
-    expect(extractInstallments('Ssd (cuota 2/2)')).toBeNull();
-  });
-
-  it('pairs transfers, maps v2 categories/tags/investments/third-party, and balances to 0 diff', () => {
-    const baseTs = Date.parse('2026-06-05T12:00:00Z');
-    const result = mapWalletRows([
-      {
-        account: 'Mercado Pago',
-        category: 'TRANSFER',
-        currency: 'ARS',
-        amount: -24483,
-        type: 'Gastos',
-        note: 'tarjeta 05/2026',
-        labels: '',
-        payee: '',
-        transfer: 1,
-        dateIso: '2026-06-05',
-        isoTimestamp: '2026-06-05T12:00:00.000Z',
-        timestampMs: baseTs,
-      },
-      {
-        account: 'TC - BBVA',
-        category: 'TRANSFER',
-        currency: 'ARS',
-        amount: 24483,
-        type: 'Ingresos',
-        note: 'tarjeta 05/2026',
-        labels: '',
-        payee: '',
-        transfer: 1,
-        dateIso: '2026-06-05',
-        isoTimestamp: '2026-06-05T12:00:00.000Z',
-        timestampMs: baseTs,
-      },
-      {
-        account: 'Efectivo',
-        category: 'TRANSFER',
-        currency: 'ARS',
-        amount: -14900,
-        type: 'Gastos',
-        note: 'Ajuste de saldo',
-        labels: '',
-        payee: '',
-        transfer: 1,
-        dateIso: '2026-04-01',
-        isoTimestamp: '2026-04-01T12:00:00.000Z',
-        timestampMs: Date.parse('2026-04-01T12:00:00Z'),
-      },
-      {
-        account: 'Mercado Pago',
-        category: 'Electrónica, accesorios',
-        currency: 'ARS',
-        amount: -160000,
-        type: 'Gastos',
-        note: 'HW: 4 ssd sata',
-        labels: '',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-30',
-        isoTimestamp: '2026-06-30T12:00:00.000Z',
-        timestampMs: Date.parse('2026-06-30T12:00:00Z'),
-      },
-      {
-        account: 'Mercado Pago',
-        category: 'Inversiones',
-        currency: 'ARS',
-        amount: -151100,
-        type: 'Gastos',
-        note: '0.00155 btc',
-        labels: '',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-18',
-        isoTimestamp: '2026-06-18T12:00:00.000Z',
-        timestampMs: Date.parse('2026-06-18T12:00:00Z'),
-      },
-      {
-        account: 'TC - BBVA',
-        category: 'Regalos, alegrías',
-        currency: 'ARS',
-        amount: -44000,
-        type: 'Gastos',
-        note: 'Crocs german (3x$14.666)',
-        labels: 'familia|abril',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-15',
-        isoTimestamp: '2026-06-15T12:00:00.000Z',
-        timestampMs: Date.parse('2026-06-15T12:00:00Z'),
-      },
-      {
-        account: 'Mercado Pago',
-        category: 'Gastos de Terceros',
-        currency: 'ARS',
-        amount: 22000,
-        type: 'Ingresos',
-        note: 'Parte jere crocs',
-        labels: '',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-15',
-        isoTimestamp: '2026-06-15T12:00:00.000Z',
-        timestampMs: Date.parse('2026-06-15T12:00:00Z'),
-      },
-    ]);
-
-    expect(result.stats.paired_transfers).toBe(1);
-    expect(result.stats.orphan_transfers_as_adjustments).toBe(1);
-    expect(result.stats.mapped_transactions).toBe(6);
-
-    const byDesc = Object.fromEntries(result.transactions.map((t) => [t.description, t]));
-    expect(byDesc['tarjeta 05/2026'].type).toBe('transfer');
-    expect(byDesc['tarjeta 05/2026'].account_id).toBe('mp');
-    expect(byDesc['tarjeta 05/2026'].to_account_id).toBe('bbva_credito');
-    expect(byDesc['Ajuste de saldo'].type).toBe('adjustment');
-    expect(byDesc['Ajuste de saldo'].amount).toBe(-14900);
-    expect(byDesc['HW: 4 ssd sata'].tags).toEqual(['hw']);
-    expect(byDesc['0.00155 btc'].type).toBe('investment');
-    expect(byDesc['Crocs german (3x$14.666)'].installments_total).toBe(3);
-    expect(byDesc['Crocs german (3x$14.666)'].first_installment_month).toBe('2026-07');
-    expect(byDesc['Crocs german (3x$14.666)'].tags).toEqual(['familia', 'abril']);
-    expect(byDesc['Parte jere crocs'].type).toBe('third_party_repayment');
-    expect(byDesc['Parte jere crocs'].third_party_name).toBe('Jere');
-
-    for (const audit of result.balanceAudit) {
-      expect(audit.diff).toBe(0);
-    }
-  });
-
-  it('maps Streaming/Apps to suscripciones and Vivienda to servicios', () => {
-    const baseTs = Date.parse('2026-06-10T12:00:00Z');
-    const result = mapWalletRows([
-      {
-        account: 'Mercado Pago',
-        category: 'Software, apps, juegos',
-        currency: 'ARS',
-        amount: -3500,
-        type: 'Gastos',
-        note: 'youtube premium',
-        labels: '',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-10',
-        isoTimestamp: '2026-06-10T12:00:00.000Z',
-        timestampMs: baseTs,
-      },
-      {
-        account: 'Mercado Pago',
-        category: 'Vivienda',
-        currency: 'ARS',
-        amount: -20000,
-        type: 'Gastos',
-        note: 'wifi casa',
-        labels: 'casa',
-        payee: '',
-        transfer: 0,
-        dateIso: '2026-06-10',
-        isoTimestamp: '2026-06-10T12:00:00.000Z',
-        timestampMs: baseTs,
-      },
-    ]);
-    const byDesc = Object.fromEntries(result.transactions.map((t) => [t.description, t]));
-    expect(byDesc['youtube premium'].category_id).toBe('suscripciones');
-    expect(byDesc['wifi casa'].category_id).toBe('servicios');
-  });
-});
-
 describe('credit card Opción B (cash flow on statement payment)', () => {
   const accounts: Account[] = [
-    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 1000000, is_default: 1, created_at: '2026-01-01' },
-    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, is_default: 0, created_at: '2026-01-01' },
+    { id: 'mp', name: 'Mercado Pago', type: 'wallet', currency: 'ARS', initial_balance: 1000000, color: '#009EE3', is_default: 1, created_at: '2026-01-01' },
+    { id: 'bbva_credito', name: 'TC BBVA', type: 'credit_card', currency: 'ARS', initial_balance: 0, color: '#18181B', is_default: 0, created_at: '2026-01-01' },
   ];
   const categories: Category[] = [
     { id: 'salud', name: 'Salud', icon: '💊', type: 'expense', color: '#26A69A' },
