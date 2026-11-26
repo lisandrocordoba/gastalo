@@ -1,3 +1,7 @@
+export const SUPPORTED_CURRENCIES = ['ARS', 'USD', 'BRL'] as const;
+
+export type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number];
+
 export type AccountType = 'wallet' | 'savings' | 'credit_card' | 'cash';
 
 export type AccountingBasis = 'cash' | 'accrual';
@@ -116,10 +120,12 @@ export interface CardStatement {
   total_due: number;
   own_total: number;
   third_party_total: number;
-  status: 'pending' | 'paid';
+  status: 'pending' | 'partial' | 'paid';
   paid_transaction_id: string | null;
+  paid_transaction_ids?: string[];
   paid_at: string | null;
   paid_amount: number | null;
+  remaining_due?: number;
   items: CardStatementItem[];
   recurring_items: CardStatementRecurringItem[];
 }
@@ -160,10 +166,12 @@ export interface MonthSummary {
   expense: number;
   card_purchases: number;
   card_purchases_usd: number;
+  card_purchases_brl?: number;
   investment: number;
   net: number;
   net_after_investment: number;
   usd_expense: number;
+  brl_expense?: number;
   by_category: CategoryBreakdown[];
   by_tag: TagBreakdown[];
   third_party_pending: number;
@@ -211,6 +219,7 @@ export interface MonthProjection {
   recurring: RecurringItem[];
   recurring_total_amount: number;
   recurring_usd_total_amount: number;
+  recurring_brl_total_amount?: number;
   total_committed: number;
 }
 
@@ -233,6 +242,7 @@ export interface BootstrapResponse {
   summary: MonthSummary;
   monthlyHistory: MonthlyHistoryPoint[];
   transactions: Transaction[];
+  hasMore?: boolean;
   referencedTransactions?: Transaction[];
   today?: string;
   timezone?: string;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Trash2, X } from 'lucide-react';
-import type { AccountType, AccountWithBalance } from '../types';
+import { SUPPORTED_CURRENCIES, type AccountType, type AccountWithBalance, type SupportedCurrency } from '../types';
 
 interface Props {
   open: boolean;
@@ -38,7 +38,15 @@ const ACCOUNT_TYPES: { id: AccountType; label: string }[] = [
   { id: 'credit_card', label: 'Tarjeta de crédito' },
 ];
 
-const CURRENCIES = ['ARS', 'USD', 'EUR', 'BRL', 'CLP', 'UYU', 'MXN'];
+const CURRENCY_LABELS: Record<SupportedCurrency, string> = {
+  ARS: 'ARS ($)',
+  USD: 'USD (US$)',
+  BRL: 'BRL (R$)',
+};
+
+function isSupportedCurrency(value: string): value is SupportedCurrency {
+  return (SUPPORTED_CURRENCIES as readonly string[]).includes(value);
+}
 
 const COLOR_SWATCHES = [
   '#009EE3',
@@ -88,9 +96,10 @@ export function AccountModal({
     if (!open) return;
     setError('');
     if (editing) {
+      const normalizedCurrency = editing.currency.trim().toUpperCase();
       setName(editing.name);
       setType(editing.type);
-      setCurrency(editing.currency);
+      setCurrency(isSupportedCurrency(normalizedCurrency) ? normalizedCurrency : 'ARS');
       setInitialBalance(String(editing.initial_balance));
       setColor(editing.color || defaultColorForType(editing.type));
       setColorTouched(true);
@@ -238,12 +247,18 @@ export function AccountModal({
                 onChange={(e) => setCurrency(e.target.value)}
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
               >
-                {CURRENCIES.map((c) => (
+                {SUPPORTED_CURRENCIES.map((c) => (
                   <option key={c} value={c}>
-                    {c}
+                    {CURRENCY_LABELS[c]}
                   </option>
                 ))}
               </select>
+              {editing && !isSupportedCurrency(editing.currency.trim().toUpperCase()) && (
+                <p className="mt-1 text-[11px] text-amber-300">
+                  Moneda original &ldquo;{editing.currency}&rdquo; no soportada; se guardará en{' '}
+                  {currency}.
+                </p>
+              )}
             </div>
           </div>
 
