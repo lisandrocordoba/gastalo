@@ -5,11 +5,13 @@ import {
   createRecurringItem,
   createTransaction,
   getTransactionById,
+  listAccountsWithBalances,
+  listRecurringItems,
   listTags,
 } from '../src/db';
 import { handleTelegramUpdate, type TelegramUpdate } from '../src/telegram';
 import type { Env } from '../src/types';
-import { currentMonthInTimezone } from '../src/utils';
+import { addMonths, currentMonthInTimezone } from '../src/utils';
 import { createTestD1 } from './helpers/d1Mock';
 
 const { mockInteractionsCreate } = vi.hoisted(() => ({
@@ -679,6 +681,347 @@ describe('Telegram webhook handler integration', () => {
 
       const sentMsg = tgCalls.find((c) => c.method === 'sendMessage')?.body?.text;
       expect(sentMsg).toBe('Gastaste $ 12.000 en Compras este mes.');
+    });
+  });
+
+  describe('level 1 capabilities: recurring, cross-currency, multi-month queries, closing_day, and unsupported guidance', () => {
+    it('creates recurring item via manage intent, lists it via /fijos, and deletes it via delrec callback', async () => {
+      const cardUsd = await createAccount(db, {
+        name: 'Card USD',
+        type: 'credit_card',
+        currency: 'USD',
+        closing_day: 27,
+        due_day: 9,
+      });
+
+      mockInteractionsCreate.mockResolvedValueOnce({
+        output_text: JSON.stringify({
+          intent: 'manage',
+          transactions: [],
+          operations: [
+            {
+              action: 'create_recurring',
+              name: 'Cloud AI Pro',
+              recurring_type: 'expense',
+              amount: 5,
+              currency: 'USD',
+              account_id: cardUsd.id,
+              category_id: 'suscripciones',
+              day_of_month: 15,
+              start_month: '2026-12',
+            },
+          ],
+        }),
+      });
+
+      await handleTelegramUpdate(env, {
+        update_id: 401,
+        message: {
+          message_id: 9101,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: 'Agregá gasto fijo en Card USD: Cloud AI Pro 5 USD, arranca en 2026-12 día 15',
+        },
+      });
+
+      const recList = await listRecurringItems(db);
+      expect(recList).toHaveLength(1);
+      expect(recList[0]).toMatchObject({
+        name: 'Cloud AI Pro',
+        amount: 5,
+        currency: 'USD',
+        account_id: cardUsd.id,
+        category_id: 'suscripciones',
+        start_month: '2026-12',
+        day_of_month: 15,
+      });
+
+      const createdMsg = tgCalls.find((c) => c.method === 'sendMessage')?.body;
+      expect(String(createdMsg?.text ?? '')).toContain('Gasto fijo creado');
+      expect(String(createdMsg?.text ?? '')).toContain('Cloud AI Pro');
+      const markup = createdMsg?.reply_markup as {
+        inline_keyboard: Array<Array<{ text: string; callback_data?: string }>>;
+      };
+      const delCb = markup.inline_keyboard.flat()[0]?.callback_data ?? '';
+      expect(delCb).toBe(`delrec:${recList[0].id}`);
+      expect(utf8ByteLength(delCb)).toBeLessThanOrEqual(64);
+
+      // /fijos lists active recurring item
+      tgCalls.length = 0;
+      await handleTelegramUpdate(env, {
+        update_id: 402,
+        message: {
+          message_id: 9102,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: '/fijos',
+        },
+      });
+      const fijosText = String(tgCalls.find((c) => c.method === 'sendMessage')?.body?.text ?? '');
+      expect(fijosText).toContain('Cloud AI Pro');
+      expect(fijosText).toContain('US$ 5');
+      expect(fijosText).toContain('desde 2026-12');
+
+      // delrec callback removes it
+      tgCalls.length = 0;
+      await handleTelegramUpdate(env, {
+        update_id: 403,
+        callback_query: {
+          id: 'cb_delrec',
+          from: { id: ALLOWED_USER_NUM },
+          message: { message_id: 70, chat: { id: ALLOWED_USER_NUM } },
+          data: delCb,
+        },
+      });
+      expect(await listRecurringItems(db)).toEqual([]);
+      expect(String(tgCalls.find((c) => c.method === 'editMessageText')?.body?.text ?? '')).toContain(
+        'Gasto fijo eliminado'
+      );
+    });
+
+    it('passes closing_day on create_account and supports cross-currency transfers with to_amount', async () => {
+      const arsWallet = await createAccount(db, {
+        name: 'Primary ARS',
+        type: 'wallet',
+        currency: 'ARS',
+        initial_balance: 50000,
+        is_default: 1,
+      });
+
+      mockInteractionsCreate.mockResolvedValueOnce({
+        output_text: JSON.stringify({
+          intent: 'manage',
+          transactions: [],
+          operations: [
+            {
+              action: 'create_account',
+              name: 'Visa Closing',
+              account_type: 'credit_card',
+              currency: 'USD',
+              initial_balance: 0,
+              is_default: false,
+              due_day: 9,
+              closing_day: 27,
+            },
+          ],
+        }),
+      });
+
+      await handleTelegramUpdate(env, {
+        update_id: 404,
+        message: {
+          message_id: 9201,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: 'Agregá tarjeta Visa Closing en USD, cierra el 27 y vence el 9',
+        },
+      });
+
+      const accountsAfterCreate = await listAccountsWithBalances(db);
+      const usdCard = accountsAfterCreate.find((a) => a.name === 'Visa Closing')!;
+      expect(usdCard).toBeDefined();
+      expect(usdCard.closing_day).toBe(27);
+      expect(usdCard.due_day).toBe(9);
+      const accMsgText = String(tgCalls.find((c) => c.method === 'sendMessage')?.body?.text ?? '');
+      expect(accMsgText).toContain('Cierre:</b> día 27');
+
+      tgCalls.length = 0;
+      mockInteractionsCreate.mockResolvedValueOnce({
+        output_text: JSON.stringify({
+          intent: 'record',
+          transactions: [
+            {
+              type: 'transfer',
+              amount: 10350,
+              to_amount: 6.69,
+              currency: 'ARS',
+              account_id: arsWallet.id,
+              to_account_id: usdCard.id,
+              description: 'Pago resumen Visa Closing',
+              occurred_at: '2026-11-26',
+              statement_month: '2026-12',
+              tags: [],
+            },
+          ],
+          operations: [],
+        }),
+      });
+
+      await handleTelegramUpdate(env, {
+        update_id: 405,
+        message: {
+          message_id: 9202,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: 'Pagué 6,69 USD de Visa Closing con 10350 pesos desde Primary ARS',
+        },
+      });
+
+      const txMsg = String(tgCalls.find((c) => c.method === 'sendMessage')?.body?.text ?? '');
+      expect(txMsg).toContain('Transferencia registrada');
+      expect(txMsg).toContain('$ 10.350');
+      expect(txMsg).toContain('Acreditado:</b> US$ 6,69');
+
+      const finalBalances = Object.fromEntries(
+        (await listAccountsWithBalances(db)).map((a) => [a.id, a.balance])
+      );
+      expect(finalBalances[arsWallet.id]).toBe(39650);
+      expect(finalBalances[usdCard.id]).toBe(6.69);
+    });
+
+    it('lists bot capabilities & limits in /ayuda and responds cleanly to unsupported intent', async () => {
+      await handleTelegramUpdate(env, {
+        update_id: 406,
+        message: {
+          message_id: 9301,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: '/ayuda',
+        },
+      });
+      const helpText = String(tgCalls.find((c) => c.method === 'sendMessage')?.body?.text ?? '');
+      expect(helpText).toContain('/fijos');
+      expect(helpText).toContain('Qué NO hace el bot');
+
+      tgCalls.length = 0;
+      await createAccount(db, {
+        name: 'Wallet',
+        type: 'wallet',
+        currency: 'ARS',
+        is_default: 1,
+      });
+
+      mockInteractionsCreate.mockResolvedValueOnce({
+        output_text: JSON.stringify({
+          intent: 'unsupported',
+          reply_text: 'Para conciliar el saldo real usá el botón ⚖️ en Cuentas del Dashboard.',
+          transactions: [],
+          operations: [],
+        }),
+      });
+
+      await handleTelegramUpdate(env, {
+        update_id: 407,
+        message: {
+          message_id: 9302,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: 'Conciliá mi saldo real en $ 50.000',
+        },
+      });
+
+      const sent = tgCalls.find((c) => c.method === 'sendMessage')?.body;
+      expect(String(sent?.text ?? '')).toContain('Acción no disponible por Telegram');
+      expect(String(sent?.text ?? '')).toContain('Dashboard');
+      const markup = sent?.reply_markup as {
+        inline_keyboard: Array<Array<{ text: string; web_app?: { url: string } }>>;
+      };
+      expect(markup.inline_keyboard[0][0].web_app?.url).toBe('https://wallet.example.test');
+    });
+
+    it('supports /resumen YYYY-MM, multi-month query_month, active recurring items in query context, and partial overdue remaining_due', async () => {
+      const wallet = await createAccount(db, {
+        name: 'Primary Wallet',
+        type: 'wallet',
+        currency: 'ARS',
+        initial_balance: 100000,
+        is_default: 1,
+      });
+      const card = await createAccount(db, {
+        name: 'Main Card',
+        type: 'credit_card',
+        currency: 'ARS',
+        due_day: 9,
+      });
+
+      const currentYm = currentMonthInTimezone(TIMEZONE);
+      const prevYm = addMonths(currentYm, -1);
+      const overdueYm = addMonths(currentYm, -2);
+
+      await createTransaction(db, {
+        type: 'expense',
+        amount: 8500,
+        account_id: wallet.id,
+        category_id: 'supermercado',
+        description: 'Super mes pasado',
+        occurred_at: `${prevYm}-12`,
+        source: 'web',
+      });
+
+      // Partial overdue statement (20000 due, 5000 paid -> 15000 remaining)
+      await createTransaction(db, {
+        type: 'expense',
+        amount: 20000,
+        account_id: card.id,
+        category_id: 'compras',
+        description: 'Compra vencida parcial',
+        occurred_at: `${addMonths(overdueYm, -1)}-10`,
+        statement_month: overdueYm,
+        source: 'web',
+      });
+      await createTransaction(db, {
+        type: 'transfer',
+        amount: 5000,
+        account_id: wallet.id,
+        to_account_id: card.id,
+        description: 'Adelanto resumen',
+        occurred_at: `${overdueYm}-05`,
+        statement_month: overdueYm,
+        source: 'web',
+      });
+
+      await createRecurringItem(db, {
+        name: 'Fibra Internet',
+        type: 'expense',
+        amount: 25000,
+        account_id: wallet.id,
+        category_id: 'servicios',
+        start_month: prevYm,
+      });
+
+      await handleTelegramUpdate(env, {
+        update_id: 408,
+        message: {
+          message_id: 9401,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: `/resumen ${prevYm}`,
+        },
+      });
+      const cmdSummary = String(tgCalls.find((c) => c.method === 'sendMessage')?.body?.text ?? '');
+      expect(cmdSummary).toContain(`Resumen ${prevYm}`);
+      expect(cmdSummary).toContain('$ 8.500');
+      expect(cmdSummary).toContain('$ 15.000 (parcial, total $ 20.000)');
+
+      tgCalls.length = 0;
+      mockInteractionsCreate
+        .mockResolvedValueOnce({
+          output_text: JSON.stringify({
+            intent: 'query',
+            transcribed_query: '¿Cuánto gasté el mes pasado?',
+            query_month: prevYm,
+            transactions: [],
+            operations: [],
+          }),
+        })
+        .mockResolvedValueOnce({
+          output_text: `En ${prevYm} gastaste $ 8.500.`,
+        });
+
+      await handleTelegramUpdate(env, {
+        update_id: 409,
+        message: {
+          message_id: 9402,
+          from: { id: ALLOWED_USER_NUM },
+          chat: { id: ALLOWED_USER_NUM },
+          text: '¿Cuánto gasté el mes pasado?',
+        },
+      });
+
+      const queryCallInput = (mockInteractionsCreate.mock.calls[1][0] as { input: string }).input;
+      expect(queryCallInput).toContain(`Datos reales del mes ${prevYm}:`);
+      expect(queryCallInput).toContain('Fibra Internet');
+      expect(queryCallInput).toContain('pendiente $ 15.000 (parcial de $ 20.000)');
     });
   });
 });

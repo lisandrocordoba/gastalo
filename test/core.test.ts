@@ -655,6 +655,86 @@ describe('agnostic gemini intent sanitization', () => {
     );
     expect(noBrlOut.transactions[0].account_id).toBe('galicia');
     expect(noBrlOut.transactions[0].currency).toBe('ARS');
+
+    // Supports create_recurring, cross-currency transfers with to_amount, query_month, and unsupported intent
+    const level1Out = sanitizeParsedIntent(
+      {
+        intent: 'manage',
+        query_month: '2026-10',
+        operations: [
+          {
+            action: 'create_recurring',
+            name: 'Cloud AI Pro',
+            recurring_type: 'expense',
+            amount: 5,
+            currency: 'USD',
+            account_id: 'galicia', // USD card exists -> resolves to visa_usd
+            category_id: 'otros',
+            day_of_month: 15,
+            start_month: '2026-12',
+          },
+          {
+            action: 'create_recurring',
+            name: 'Monto inválido',
+            amount: 0,
+            account_id: 'galicia',
+          },
+        ],
+      },
+      { accounts: multiCurrencyAccounts, categories, today: '2026-11-26' }
+    );
+    expect(level1Out.query_month).toBe('2026-10');
+    expect(level1Out.operations).toEqual([
+      {
+        action: 'create_recurring',
+        name: 'Cloud AI Pro',
+        recurring_type: 'expense',
+        amount: 5,
+        currency: 'USD',
+        account_id: 'visa_usd',
+        category_id: 'otros',
+        day_of_month: 15,
+        start_month: '2026-12',
+      },
+    ]);
+
+    const fxTransferOut = sanitizeParsedIntent(
+      {
+        intent: 'record',
+        transactions: [
+          {
+            type: 'transfer',
+            amount: 10350,
+            to_amount: 6.69,
+            currency: 'ARS',
+            account_id: 'galicia',
+            to_account_id: 'visa_usd',
+            description: 'Pago resumen Tarjeta USD',
+            occurred_at: '2026-11-26',
+            statement_month: '2026-12',
+            tags: [],
+          },
+        ],
+      },
+      { accounts: multiCurrencyAccounts, categories, today: '2026-11-26' }
+    );
+    expect(fxTransferOut.transactions).toHaveLength(1);
+    expect(fxTransferOut.transactions[0].amount).toBe(10350);
+    expect(fxTransferOut.transactions[0].to_amount).toBe(6.69);
+    expect(fxTransferOut.transactions[0].to_account_id).toBe('visa_usd');
+    expect(fxTransferOut.transactions[0].statement_month).toBe('2026-12');
+
+    const unsupportedOut = sanitizeParsedIntent(
+      {
+        intent: 'unsupported',
+        reply_text: 'Editá movimientos históricos desde Movimientos en el Dashboard.',
+        transactions: [],
+        operations: [],
+      },
+      { accounts: multiCurrencyAccounts, categories, today: '2026-11-26' }
+    );
+    expect(unsupportedOut.intent).toBe('unsupported');
+    expect(unsupportedOut.reply_text).toContain('Movimientos');
   });
 });
 

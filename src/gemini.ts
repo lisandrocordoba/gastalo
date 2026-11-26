@@ -11,6 +11,7 @@ import {
   type MonthSummary,
   type ParsedIntent,
   type ParsedTransactionDraft,
+  type RecurringItem,
   type SupportedCurrency,
   type Tag,
   type Transaction,
@@ -34,18 +35,24 @@ const PARSE_SCHEMA = {
   properties: {
     intent: {
       type: 'string',
-      enum: ['record', 'query', 'manage', 'unknown'],
+      enum: ['record', 'query', 'manage', 'unsupported', 'unknown'],
       description:
-        'record si reporta movimientos, query si pregunta finanzas, manage si pide crear cuentas/tarjetas/categorias/etiquetas, unknown si no se entiende',
+        'record si reporta movimientos, query si pregunta finanzas, manage si pide crear cuentas/tarjetas/categorias/etiquetas/gastos fijos, unsupported si pide una acción no soportada por el bot (como editar/borrar existentes, conciliar o sellos/CSV), unknown si no se entiende o faltan datos',
     },
     reply_text: {
       type: 'string',
-      description: 'Solo completar si intent es unknown para guiar brevemente al usuario en español',
+      description:
+        'Completar si intent es unknown (para guiar brevemente) o unsupported (explicando en español qué no hace el bot y qué sección del Dashboard usar)',
     },
     transcribed_query: {
       type: ['string', 'null'],
       description:
         'Cuando intent es query, completar con la pregunta exacta del usuario (especialmente en notas de voz); sino null',
+    },
+    query_month: {
+      type: ['string', 'null'],
+      description:
+        'Solo si intent es query y pregunta por un mes específico (ej. "mes pasado", "octubre"): mes YYYY-MM; sino null para mes actual',
     },
     transactions: {
       type: 'array',
@@ -60,6 +67,11 @@ const PARSE_SCHEMA = {
           currency: { type: 'string', enum: [...SUPPORTED_CURRENCIES] },
           account_id: { type: 'string' },
           to_account_id: { type: ['string', 'null'] },
+          to_amount: {
+            type: ['number', 'null'],
+            description:
+              'Solo para transfer entre cuentas de distinta moneda: monto exacto acreditado en la moneda de to_account_id',
+          },
           category_id: { type: ['string', 'null'] },
           description: { type: 'string' },
           occurred_at: { type: 'string', description: 'Fecha YYYY-MM-DD' },
@@ -88,7 +100,7 @@ const PARSE_SCHEMA = {
         properties: {
           action: {
             type: 'string',
-            enum: ['create_account', 'create_category', 'create_tag'],
+            enum: ['create_account', 'create_category', 'create_tag', 'create_recurring'],
           },
           name: { type: 'string' },
           account_type: {
@@ -112,6 +124,30 @@ const PARSE_SCHEMA = {
             enum: ['expense', 'income', 'both', null],
           },
           color: { type: ['string', 'null'] },
+          recurring_type: {
+            type: ['string', 'null'],
+            enum: ['expense', 'income', null],
+          },
+          amount: {
+            type: ['number', 'null'],
+            description: 'Monto positivo solo para create_recurring',
+          },
+          account_id: {
+            type: ['string', 'null'],
+            description: 'ID de cuenta o tarjeta solo para create_recurring',
+          },
+          category_id: {
+            type: ['string', 'null'],
+            description: 'ID de categoría solo para create_recurring',
+          },
+          day_of_month: {
+            type: ['integer', 'null'],
+            description: 'Día del mes (1-31) opcional para create_recurring',
+          },
+          start_month: {
+            type: ['string', 'null'],
+            description: 'Primer mes o resumen YYYY-MM para create_recurring',
+          },
         },
         required: ['action', 'name'],
       },
@@ -137,6 +173,7 @@ interface RawParsedTransaction {
   currency?: unknown;
   account_id?: unknown;
   to_account_id?: unknown;
+  to_amount?: unknown;
   category_id?: unknown;
   description?: unknown;
   occurred_at?: unknown;
@@ -161,12 +198,19 @@ interface RawManageOperation {
   icon?: unknown;
   category_type?: unknown;
   color?: unknown;
+  recurring_type?: unknown;
+  amount?: unknown;
+  account_id?: unknown;
+  category_id?: unknown;
+  day_of_month?: unknown;
+  start_month?: unknown;
 }
 
 export interface RawParsedIntent {
   intent?: unknown;
   reply_text?: unknown;
   transcribed_query?: unknown;
+  query_month?: unknown;
   transactions?: RawParsedTransaction[];
   operations?: RawManageOperation[];
 }
@@ -264,6 +308,60 @@ export function sanitizeParsedIntent(
           name: cleanName.replace(/^#/, ''),
           color,
         });
+      } else if (rawOp.action === 'create_recurring') {
+        if (params.accounts.length === 0) continue;
+        const rawAmt = typeof rawOp.amount === 'number' ? rawOp.amount : Number(rawOp.amount);
+        if (!Number.isFinite(rawAmt) || rawAmt <= 0) continue;
+        const amount = Math.round(rawAmt * 100) / 100;
+
+        const reqCurrency =
+          typeof rawOp.currency === 'string' ? normalizeCurrency(rawOp.currency) : null;
+        let account_id =
+          typeof rawOp.account_id === 'string' && accountMap.has(rawOp.account_id)
+            ? rawOp.account_id
+            : (
+                pickDefaultLiquidAccount(params.accounts, reqCurrency ?? defaultCurrency) ??
+                params.accounts[0]
+              ).id;
+        let chosenAcc = accountMap.get(account_id)!;
+        if (reqCurrency && chosenAcc.currency !== reqCurrency) {
+          const sameType = params.accounts.find(
+            (a) => a.type === chosenAcc.type && a.currency === reqCurrency
+          );
+          const anyCur = sameType ?? params.accounts.find((a) => a.currency === reqCurrency);
+          if (anyCur) {
+            account_id = anyCur.id;
+            chosenAcc = anyCur;
+          }
+        }
+
+        const recurring_type: 'expense' | 'income' =
+          rawOp.recurring_type === 'income' ? 'income' : 'expense';
+        const candidateCat = typeof rawOp.category_id === 'string' ? rawOp.category_id : '';
+        const category_id = candidateCat && validCategoryIds.has(candidateCat) ? candidateCat : null;
+        const day_of_month =
+          typeof rawOp.day_of_month === 'number' &&
+          Number.isInteger(rawOp.day_of_month) &&
+          rawOp.day_of_month >= 1 &&
+          rawOp.day_of_month <= 31
+            ? rawOp.day_of_month
+            : null;
+        const start_month =
+          typeof rawOp.start_month === 'string' && isValidYearMonth(rawOp.start_month.trim())
+            ? rawOp.start_month.trim()
+            : params.today.slice(0, 7);
+
+        operations.push({
+          action: 'create_recurring',
+          name: cleanName,
+          recurring_type,
+          amount,
+          currency: chosenAcc.currency,
+          account_id,
+          category_id,
+          day_of_month,
+          start_month,
+        });
       }
     }
   }
@@ -304,16 +402,28 @@ export function sanitizeParsedIntent(
             }
 
             let to_account_id: string | null = null;
+            let to_amount: number | null = null;
             if (type === 'transfer') {
               const candidate = typeof tx.to_account_id === 'string' ? tx.to_account_id : '';
               const candidateAcc = candidate ? accountMap.get(candidate) : undefined;
-              if (
-                candidateAcc &&
-                candidateAcc.id !== account_id &&
-                candidateAcc.currency === chosenAcc.currency
-              ) {
-                to_account_id = candidateAcc.id;
-              } else {
+              const rawToAmt =
+                typeof tx.to_amount === 'number'
+                  ? tx.to_amount
+                  : tx.to_amount !== null &&
+                      tx.to_amount !== undefined &&
+                      String(tx.to_amount).trim() !== ''
+                    ? Number(tx.to_amount)
+                    : NaN;
+              const hasPosToAmt = Number.isFinite(rawToAmt) && rawToAmt > 0;
+              if (candidateAcc && candidateAcc.id !== account_id) {
+                if (candidateAcc.currency === chosenAcc.currency) {
+                  to_account_id = candidateAcc.id;
+                } else if (hasPosToAmt) {
+                  to_account_id = candidateAcc.id;
+                  to_amount = Math.round(rawToAmt * 100) / 100;
+                }
+              }
+              if (!to_account_id) {
                 const savingsAcc = params.accounts.find(
                   (a) =>
                     a.type === 'savings' &&
@@ -429,6 +539,7 @@ export function sanitizeParsedIntent(
                 currency,
                 account_id,
                 to_account_id,
+                to_amount,
                 category_id,
                 description:
                   (typeof tx.description === 'string' ? tx.description : 'Movimiento')
@@ -450,6 +561,7 @@ export function sanitizeParsedIntent(
     parsed.intent === 'record' ||
     parsed.intent === 'query' ||
     parsed.intent === 'manage' ||
+    parsed.intent === 'unsupported' ||
     parsed.intent === 'unknown'
       ? parsed.intent
       : 'unknown';
@@ -459,10 +571,16 @@ export function sanitizeParsedIntent(
       ? parsed.transcribed_query.trim()
       : null;
 
+  const query_month =
+    typeof parsed.query_month === 'string' && isValidYearMonth(parsed.query_month.trim())
+      ? parsed.query_month.trim()
+      : null;
+
   return {
     intent,
     reply_text: typeof parsed.reply_text === 'string' ? parsed.reply_text : undefined,
     transcribed_query,
+    query_month,
     transactions: sanitized,
     operations,
   };
@@ -509,7 +627,9 @@ export async function parseMessageWithGemini(env: Env, params: ParseInput): Prom
       : '(Sin categorías)';
 
   const tagList = params.tags.length > 0 ? params.tags.map((t) => `#${t.id}`).join(', ') : '(Sin etiquetas)';
-  const nextMonth = addMonths(params.today.slice(0, 7), 1);
+  const currentYm = params.today.slice(0, 7);
+  const nextMonth = addMonths(currentYm, 1);
+  const prevMonth = addMonths(currentYm, -1);
 
   const emptyAccountsRule =
     params.accounts.length === 0
@@ -520,24 +640,29 @@ export async function parseMessageWithGemini(env: Env, params: ParseInput): Prom
 Interpretá mensajes de texto, notas de voz o fotos de tickets/comprobantes para:
 - Registrar movimientos financieros (intent: "record")
 - Responder consultas financieras (intent: "query")
-- Crear cuentas, tarjetas de crédito, categorías o etiquetas (intent: "manage")
+- Crear cuentas, tarjetas de crédito, categorías, etiquetas o gastos fijos/suscripciones recurrentes (intent: "manage")
+- Explicar claramente cuando pide algo que el bot NO soporta (intent: "unsupported")
 
-Fecha de hoy (${env.TIMEZONE || 'America/Argentina/Buenos_Aires'}): ${params.today}
+Fecha de hoy (${env.TIMEZONE || 'America/Argentina/Buenos_Aires'}): ${params.today} (mes actual: ${currentYm}, mes anterior: ${prevMonth}, mes próximo: ${nextMonth})
 Moneda por defecto: ${defaultCurrency}
 
 CUENTAS DISPONIBLES (usar exactamente estos IDs):
 ${accountList}
 
-CATEGORÍAS DISPONIBLES (usar exactamente estos IDs solo para expense o income):
+CATEGORÍAS DISPONIBLES (usar exactamente estos IDs solo para expense, income o create_recurring):
 ${categoryList}
 
 ETIQUETAS DISPONIBLES (devolver sin el #, ej. "hormiga"): ${tagList}
 ${emptyAccountsRule}
 
 REGLAS PARA MOVIMIENTOS (intent: "record"):
-1. Cuenta por defecto: elegí la cuenta marcada como PRINCIPAL (o la cuenta líquida cuyo nombre/tipo mejor coincida con lo mencionado en el mensaje).
+1. Cuenta por defecto: elegí la cuenta marcada como PRINCIPAL (o la cuenta líquida cuyo nombre/tipo mejor coincida con lo mencionado en el mensaje). Nunca uses "record" si el usuario pide explícitamente crear un "gasto fijo", "suscripción", "débito automático" o "recurrente" mensual -> eso es intent: "manage" con action: "create_recurring".
 2. Si menciona pagar en dólares / USD o reales / BRL y existe una cuenta o tarjeta en esa moneda compatible, elegí esa cuenta y currency: "USD" o "BRL".
-3. Transferencias internas entre cuentas propias (ej. mover dinero hacia ahorros/reservas o pagar el resumen de una tarjeta desde una cuenta líquida): type: "transfer", account_id = origen, to_account_id = destino. Si es un pago de resumen de tarjeta (destino tipo credit_card), completar statement_month (por defecto el mes de pago YYYY-MM, o el mes de resumen mencionado).
+3. Transferencias internas entre cuentas propias o pagos de resumen de tarjeta (type: "transfer"):
+   - account_id = origen, to_account_id = destino.
+   - Si destino es credit_card, completá statement_month (YYYY-MM; por defecto el mes del pago, o el mes de resumen mencionado).
+   - Misma moneda: to_amount = null.
+   - Entre DISTINTAS monedas (ej. pagar tarjeta en USD desde billetera en ARS, o comprar USD/BRL): amount = monto debitado en moneda de account_id, currency = moneda de account_id, to_amount = monto exacto acreditado en la moneda de to_account_id. Si el usuario quiere transferir o pagar entre distintas monedas pero falta uno de los dos montos, devolvé intent: "unknown" pidiéndole ambos montos (no inventes un tipo de cambio).
 4. Separación de categorías de gasto si existen en la lista:
    - Compras de abastecimiento del hogar -> "supermercado"
    - Delivery, comida al paso o almuerzo de trabajo -> "delivery"
@@ -557,15 +682,31 @@ REGLAS PARA MOVIMIENTOS (intent: "record"):
    - Devolución de dinero de un tercero -> type: "third_party_repayment", third_party_name = nombre, category_id: null.
 10. Abreviaturas comunes: "k" o "lucas" = x1000, "palo" = x1000000.
 
-REGLAS PARA CONFIGURACIÓN (intent: "manage", operations: [...]):
-- Usar cuando el usuario pida explícitamente crear/agregar una cuenta, billetera, caja de ahorro/reservas, efectivo, tarjeta de crédito, categoría o etiqueta (ej. "Creá una cuenta Banco Galicia en ARS", "Agregá tarjeta de crédito Visa en dólares", "Creá la categoría Gimnasio", "Agregá la etiqueta #viaje").
-- account_type válidas: "wallet" (billetera/banco), "savings" (ahorro/reservas), "cash" (efectivo), "credit_card" (tarjeta de crédito).
-- Si aclara saldo inicial ("con saldo inicial 50000"), ponerlo en initial_balance.
-- Si pide marcarla como cuenta principal / por defecto, is_default: true (false para tarjetas).
-- Si es tarjeta de crédito y aclara día de cierre ("cierra el 27") o vencimiento ("vence el 10"), ponerlo en closing_day / due_day (1-31).
+REGLAS PARA CONFIGURACIÓN Y RECURRENTES (intent: "manage", operations: [...]):
+- create_account: crear/agregar cuenta, billetera, ahorro/reservas, efectivo o tarjeta de crédito (account_type: "wallet" | "savings" | "cash" | "credit_card", initial_balance, is_default, closing_day y due_day 1-31 si es tarjeta).
+- create_category: crear/agregar categoría (category_type: "expense" | "income" | "both").
+- create_tag: crear/agregar etiqueta.
+- create_recurring: cuando pide agregar/cargar un gasto fijo, suscripción mensual, débito automático o ingreso fijo (ej. "Agregá gasto fijo a tarjeta USD: Streaming 5 USD, arranca en diciembre"):
+  - name = descripción del gasto fijo o suscripción;
+  - amount = monto mensual positivo (si corresponde a tarjeta en USD/BRL o menciona moneda, usar esa moneda);
+  - account_id = cuenta o tarjeta asociada (elegí la que mejor coincida con el mensaje y moneda);
+  - recurring_type = "income" si es ingreso fijo, sino "expense";
+  - category_id = categoría correspondiente (ej. "suscripciones" o "servicios");
+  - start_month = YYYY-MM desde cuándo aplica o primer resumen (si menciona "este mes" -> "${currentYm}", "mes que viene" o el próximo mes -> "${nextMonth}", o el mes explícito como diciembre -> "${currentYm.slice(0, 4)}-12" o año correspondiente);
+  - day_of_month = entero 1-31 si indica día del mes, sino null.
+
+REGLAS PARA CONSULTAS (intent: "query"):
+- Si hace una pregunta sobre saldos, gastos, fijos, cuotas o resúmenes -> intent: "query", transactions: [], operations: [], completá transcribed_query con la pregunta exacta del usuario y query_month con YYYY-MM si pregunta por un mes distinto al actual (ej. "mes pasado" -> "${prevMonth}", o un mes específico como octubre), sino query_month = null.
+
+ACCIONES NO SOPORTADAS POR EL BOT (intent: "unsupported"):
+Si el usuario pide explícitamente alguna de estas acciones, NO inventes movimientos ni operaciones; devolvé intent: "unsupported", transactions: [], operations: [] y en reply_text explicá brevemente en 1-2 oraciones que esa acción se hace desde el Dashboard web (indicando la sección):
+- Editar, corregir monto/fecha/cuotas o borrar movimientos históricos desde texto libre (solo se puede ajustar categoría/cuenta/etiquetas o borrar usando los botones del mensaje recién enviado; el resto se edita/elimina en la sección Movimientos del Dashboard).
+- Editar, pausar o eliminar cuentas, tarjetas, categorías, etiquetas o gastos fijos ya existentes (se gestionan desde Configurar / Fijos en el Dashboard).
+- Conciliar manualmente el saldo real de una cuenta (botón ⚖️ en Cuentas del Dashboard).
+- Pagar un resumen de tarjeta con desglose de sellos/intereses (fees_amount) o postear un gasto fijo directamente en un resumen de tarjeta (se hace en Tarjetas de crédito del Dashboard).
+- Exportar CSV o ver comparativas históricas de varios años (barra superior y gráficos del Dashboard).
 
 REGLAS GENERALES:
-- Si hace una pregunta sobre saldos, gastos, cuotas o resúmenes -> intent: "query", transactions: [], operations: [], y completá transcribed_query con la pregunta exacta del usuario (especialmente para notas de voz). Si no es una consulta, transcribed_query = null.
 - Devolvé descripciones cortas y claras.`;
 
   const inputContent: Array<Record<string, unknown>> = [];
@@ -635,6 +776,7 @@ export async function answerFinancialQuery(
     recentTransactions: Transaction[];
     accounts: AccountWithBalance[];
     projection?: FutureProjection;
+    recurringItems?: RecurringItem[];
     defaultCurrency?: string;
   }
 ): Promise<string> {
@@ -699,9 +841,16 @@ ${projMonths
     params.summary.card_statements.length > 0
       ? params.summary.card_statements
           .map((s) => {
-            const state = s.status === 'paid' ? 'pagado' : s.is_overdue ? 'VENCIDO' : 'pendiente';
+            const state =
+              s.status === 'paid'
+                ? 'pagado'
+                : s.status === 'partial'
+                  ? `parcial (pagado ${formatCurrency(s.paid_amount ?? 0, s.currency)}, faltan ${formatCurrency(s.remaining_due, s.currency)})`
+                  : s.is_overdue
+                    ? `VENCIDO (faltan ${formatCurrency(s.remaining_due, s.currency)})`
+                    : `pendiente (${formatCurrency(s.remaining_due, s.currency)})`;
             const duePart = s.due_date ? `, vence ${s.due_date}` : '';
-            return `- ${s.account_name}: ${formatCurrency(s.total_due, s.currency)} (${state}${duePart})`;
+            return `- ${s.account_name}: total ${formatCurrency(s.total_due, s.currency)} (${state}${duePart})`;
           })
           .join('\n')
       : '(Sin tarjetas)';
@@ -709,12 +858,28 @@ ${projMonths
   const overdueStr =
     params.summary.overdue_card_alerts.length > 0
       ? params.summary.overdue_card_alerts
-          .map(
-            (a) =>
-              `- ${a.account_name} (${a.statement_month}): venció ${a.due_date} · ${formatCurrency(a.total_due, a.currency)}`
-          )
+          .map((a) => {
+            const rem = a.remaining_due ?? a.total_due;
+            const partialSuffix =
+              a.status === 'partial' ? ` (parcial de ${formatCurrency(a.total_due, a.currency)})` : '';
+            return `- ${a.account_name} (${a.statement_month}): venció ${a.due_date} · pendiente ${formatCurrency(rem, a.currency)}${partialSuffix}`;
+          })
           .join('\n')
       : '(Ninguno)';
+
+  const activeRecurring = (params.recurringItems ?? []).filter((r) => r.active === 1);
+  const recurringStr =
+    activeRecurring.length > 0
+      ? `\nGastos fijos y suscripciones activas:\n${activeRecurring
+          .map((r) => {
+            const accName = accountNameMap.get(r.account_id) ?? r.account_id;
+            const kind = r.type === 'income' ? 'ingreso' : 'gasto';
+            const startPart = r.start_month ? `, desde ${r.start_month}` : '';
+            const dayPart = r.day_of_month ? `, día ${r.day_of_month}` : '';
+            return `- ${r.name} (${kind}): ${formatCurrency(r.amount, r.currency)} en ${accName}${startPart}${dayPart}`;
+          })
+          .join('\n')}`
+      : '';
 
   const prompt = `<pregunta_usuario>
 ${params.question}
@@ -749,6 +914,7 @@ ${statementsStr}
 
 Resúmenes vencidos sin pagar:
 ${overdueStr}
+${recurringStr}
 ${projStr}
 
 Últimos movimientos del mes:

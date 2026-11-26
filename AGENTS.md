@@ -19,10 +19,10 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
 
 | Ruta | Responsabilidad |
 | :--- | :--- |
-| [`src/index.ts`](src/index.ts) | Entrypoint Hono: `/webhook/telegram`, `/api/bootstrap` (snapshot único en D1), CRUD `/api/accounts`, `POST /api/accounts/:id/reconcile`, `/api/categories`, `/api/tags`, `/api/recurring`, `/api/transactions`, `POST /api/transactions/shared`, `/api/cards/:id/pay-statement`, `/api/projection`, `/api/export.csv`, `/api/health`. |
-| [`src/db.ts`](src/db.ts) | Consultas D1 (`loadAllDataSnapshot` con 6 consultas vía `db.batch`) y funciones puras de negocio/contabilidad (`computeAccountBalances`, `computeCardStatements` con `pending`/`partial`/`paid`, `computeOverdueCardAlerts`, `computePeriodMetrics` con `paid_statement_items`, `computeFutureProjection`, `payCardStatement`, `reconcileAccountBalance`, `createSharedPurchase`, CRUD con `ConflictError` `409`). |
-| [`src/gemini.ts`](src/gemini.ts) | Esquema JSON estricto (`PARSE_SCHEMA`), sanitización (`sanitizeParsedIntent`), parser multimodal (`record` / `query` / `manage`) acotado a `ARS`/`USD`/`BRL` y respuestas de consultas (`answerFinancialQuery`). |
-| [`src/telegram.ts`](src/telegram.ts) | Comandos (`/start`, `/ayuda`, `/help`, `/cuentas`, `/config`, `/saldos`, `/resumen`, `/mes`, `/futuro`, `/ultimos`), botones inline (`ok`, `catm`, `cat`, `accm`, `acc`, `tagm`, `tagt`/`tagi`, `back`, `resv`, `del`, `delacc`, `delcat`, `deltag`), verificación *fail-closed* de usuario/chat privado y manejo de texto/audio/foto. |
+| [`src/index.ts`](src/index.ts) | Entrypoint Hono: `/webhook/telegram` (carga diferida de `telegram.ts`), `/api/bootstrap` (`loadBootstrapSnapshot`), CRUD `/api/accounts`, `POST /api/accounts/:id/reconcile`, `/api/categories`, `/api/tags`, `/api/recurring`, `/api/transactions`, `POST /api/transactions/shared`, `/api/cards/:id/pay-statement`, `/api/projection`, `/api/export.csv`, `/api/health`. |
+| [`src/db.ts`](src/db.ts) | Consultas D1 (`loadBootstrapSnapshot` con pushdown SQL/agregaciones en `db.batch` + `loadAllDataSnapshot`) y funciones puras (`computeAccountBalances`, `computeCardStatements` con `pending`/`partial`/`paid`, `computeOverdueCardAlerts` en 1 pasada `O(N)`, `computePeriodMetrics`, `computeMonthlyHistory`, `computeFutureProjection`, `payCardStatement`, `reconcileAccountBalance`, `createSharedPurchase`, CRUD con `ConflictError` `409`). |
+| [`src/gemini.ts`](src/gemini.ts) | Esquema JSON estricto (`PARSE_SCHEMA`), sanitización (`sanitizeParsedIntent`), parser multimodal (`record` / `query` con `query_month` / `manage` incl. `create_recurring` / `unsupported` / `unknown`) acotado a `ARS`/`USD`/`BRL`, transferencias multimoneda (`to_amount`), carga diferida de `@google/genai` y respuestas (`answerFinancialQuery`). |
+| [`src/telegram.ts`](src/telegram.ts) | Comandos (`/start`, `/ayuda`, `/help`, `/cuentas`, `/config`, `/fijos`, `/suscripciones`, `/saldos`, `/resumen [YYYY-MM]`, `/mes`, `/futuro`, `/ultimos`), botones inline (`ok`, `catm`, `cat`, `accm`, `acc`, `tagm`, `tagt`/`tagi`, `back`, `resv`, `del`, `delacc`, `delcat`, `deltag`, `delrec`), verificación *fail-closed* de usuario/chat privado y manejo de texto/audio/foto. |
 | [`src/auth.ts`](src/auth.ts) | Validación *fail-closed* en tiempo constante vía SHA-256 de `DASHBOARD_TOKEN` (`Bearer`) y verificación criptográfica HMAC-SHA256 de Telegram `initData` (`auth_date` obligatorio <= 24h y `ALLOWED_TELEGRAM_USER_ID`). |
 | [`src/types.ts`](src/types.ts) | Contratos TypeScript compartidos de backend (`SUPPORTED_CURRENCIES = ['ARS', 'USD', 'BRL']`, `PaidStatementItem`, `CardStatement`, etc.). |
 | [`src/utils.ts`](src/utils.ts) | Helpers de zona horaria (`todayInTimezone`, `currentMonthInTimezone`), meses (`addMonths`, `monthDiff`, `previousMonths`), IDs y formato `ARS`/`USD`/`BRL` (`$`, `US$`, `R$`). |
@@ -33,7 +33,7 @@ Este documento es el punto de entrada técnico para cualquier agente de desarrol
 | [`web/src/api.ts`](web/src/api.ts) | Cliente HTTP hacia `/api/*` y formateo monetario (`formatMoney`). |
 | [`web/src/components/`](web/src/components/) | `SummaryCards`, `CurrentStatusBar`, `AccountsGrid`, `CreditCardsSection`, `CategoryChart`, `MonthlyChart`, `TagsPanel`, `FutureProjectionCard`, `TransactionList`, `AccountModal`, `RecurringModal`, `TransactionModal`, `SettingsModal`, `DateRangePicker`. |
 | [`test/core.test.ts`](test/core.test.ts) | Tests unitarios de lógica contable, cuotas, `budget_month`, `start_month`, `due_day`, alertas vencidas, pagos parciales, auth *fail-closed* y `sanitizeParsedIntent`. |
-| [`docs/`](docs/) | [`ARQUITECTURA.md`](docs/ARQUITECTURA.md), [`MODELO_DATOS.md`](docs/MODELO_DATOS.md), [`PLAN_V3_AGNOSTICO.md`](docs/PLAN_V3_AGNOSTICO.md) y [`ROADMAP.md`](docs/ROADMAP.md). |
+| [`docs/`](docs/) | [`ARQUITECTURA.md`](docs/ARQUITECTURA.md), [`MODELO_DATOS.md`](docs/MODELO_DATOS.md), [`TELEGRAM_BOT.md`](docs/TELEGRAM_BOT.md), [`PLAN_V3_AGNOSTICO.md`](docs/PLAN_V3_AGNOSTICO.md) y [`ROADMAP.md`](docs/ROADMAP.md). |
 | `wrangler.example.toml` / `.dev.vars.example` | Plantillas públicas para levantar instancias limpias sin secretos ni IDs propios. |
 | `wrangler.toml`, `imports/`, `.dev.vars`, `.wrangler/`, `.agent/` | **Ignorados en `.gitignore`.** Contienen configuración personal de despliegue (`database_id`, `DASHBOARD_URL`), datos personales del usuario (CSV, migrador local), secretos y estado D1 local. **Nunca** trackear ni subir a Git. |
 
@@ -112,13 +112,15 @@ npm run dev:web
 
 # Migraciones D1
 npm run db:migrate:local
+npm run db:migrate:staging
 npm run db:migrate:remote
 
 # Validación obligatoria antes de cualquier commit/merge
-npm test        # Vitest (test/core.test.ts)
+npm test        # Vitest
 npm run build   # web tsc -b + vite build + root tsc --noEmit
 
-# Despliegue a producción (solo desde main, tras confirmar con el usuario)
+# Despliegue a staging (bot/DB de pruebas) y producción (solo desde main, tras confirmar)
+npm run deploy:staging
 npm run deploy
 ```
 
